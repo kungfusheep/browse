@@ -7,21 +7,34 @@ import (
 	"strings"
 )
 
+const maxContentWidth = 80
+
 // Renderer converts HTML nodes to canvas output.
 type Renderer struct {
-	canvas *render.Canvas
-	width  int
-	margin int
-	y      int
+	canvas       *render.Canvas
+	contentWidth int
+	leftMargin   int
+	y            int
 }
 
 // NewRenderer creates a renderer for the given canvas.
 func NewRenderer(c *render.Canvas) *Renderer {
+	canvasWidth := c.Width()
+
+	// Content width is capped at maxContentWidth
+	contentWidth := canvasWidth - 4 // minimal margins
+	if contentWidth > maxContentWidth {
+		contentWidth = maxContentWidth
+	}
+
+	// Center the content
+	leftMargin := (canvasWidth - contentWidth) / 2
+
 	return &Renderer{
-		canvas: c,
-		width:  c.Width(),
-		margin: 2,
-		y:      0,
+		canvas:       c,
+		contentWidth: contentWidth,
+		leftMargin:   leftMargin,
+		y:            0,
 	}
 }
 
@@ -38,10 +51,9 @@ func (r *Renderer) Render(doc *html.Node, scrollY int) {
 // ContentHeight returns the total height needed for the document.
 func (r *Renderer) ContentHeight(doc *html.Node) int {
 	height := 0
-	textWidth := r.width - (r.margin * 2)
 
 	for _, child := range doc.Children {
-		height += r.nodeHeight(child, textWidth)
+		height += r.nodeHeight(child, r.contentWidth)
 	}
 
 	return height
@@ -82,99 +94,88 @@ func (r *Renderer) nodeHeight(n *html.Node, textWidth int) int {
 }
 
 func (r *Renderer) renderNode(n *html.Node) {
-	textWidth := r.width - (r.margin * 2)
-
 	switch n.Type {
 	case html.NodeHeading1:
-		r.renderHeading1(n.Text, textWidth)
-
+		r.renderHeading1(n.Text)
 	case html.NodeHeading2:
-		r.renderHeading2(n.Text, textWidth)
-
+		r.renderHeading2(n.Text)
 	case html.NodeHeading3:
-		r.renderHeading3(n.Text, textWidth)
-
+		r.renderHeading3(n.Text)
 	case html.NodeParagraph:
-		r.renderParagraph(n, textWidth)
-
+		r.renderParagraph(n)
 	case html.NodeBlockquote:
-		r.renderBlockquote(n, textWidth)
-
+		r.renderBlockquote(n)
 	case html.NodeList:
-		r.renderList(n, textWidth)
-
+		r.renderList(n)
 	case html.NodeCodeBlock:
-		r.renderCodeBlock(n.Text, textWidth)
+		r.renderCodeBlock(n.Text)
 	}
 }
 
-func (r *Renderer) renderHeading1(text string, width int) {
+func (r *Renderer) renderHeading1(text string) {
 	r.y++
-	r.writeLine(r.margin, r.y, text, render.Style{Bold: true})
+	r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true})
 	r.y++
-	r.canvas.DrawHLine(r.margin, r.y, len(text), render.DoubleBox.Horizontal, render.Style{})
+	r.canvas.DrawHLine(r.leftMargin, r.y, len(text), render.DoubleBox.Horizontal, render.Style{})
 	r.y += 2
 }
 
-func (r *Renderer) renderHeading2(text string, width int) {
+func (r *Renderer) renderHeading2(text string) {
 	r.y++
-	r.writeLine(r.margin, r.y, text, render.Style{Bold: true})
+	r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true})
 	r.y += 2
 }
 
-func (r *Renderer) renderHeading3(text string, width int) {
-	r.writeLine(r.margin, r.y, text, render.Style{Bold: true, Underline: true})
+func (r *Renderer) renderHeading3(text string) {
+	r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true, Underline: true})
 	r.y += 2
 }
 
-func (r *Renderer) renderParagraph(n *html.Node, width int) {
+func (r *Renderer) renderParagraph(n *html.Node) {
 	text := n.PlainText()
-	lines := render.WrapAndJustify(text, width)
+	lines := render.WrapAndJustify(text, r.contentWidth)
 
 	for _, line := range lines {
-		r.writeLine(r.margin, r.y, line, render.Style{})
+		r.writeLine(r.leftMargin, r.y, line, render.Style{})
 		r.y++
 	}
 	r.y++
 }
 
-func (r *Renderer) renderBlockquote(n *html.Node, width int) {
-	// Draw left border
+func (r *Renderer) renderBlockquote(n *html.Node) {
 	startY := r.y
 
-	// Render children with indent
 	for _, child := range n.Children {
 		if child.Type == html.NodeParagraph {
 			text := child.PlainText()
-			lines := render.WrapText(text, width-4)
+			lines := render.WrapText(text, r.contentWidth-4)
 			for _, line := range lines {
-				r.writeLine(r.margin+4, r.y, line, render.Style{Dim: true})
+				r.writeLine(r.leftMargin+4, r.y, line, render.Style{Dim: true})
 				r.y++
 			}
 		}
 	}
 
-	// Draw the border
 	for y := startY; y < r.y; y++ {
 		if y >= 0 && y < r.canvas.Height() {
-			r.canvas.Set(r.margin, y, '│', render.Style{Dim: true})
+			r.canvas.Set(r.leftMargin, y, '│', render.Style{Dim: true})
 		}
 	}
 
 	r.y++
 }
 
-func (r *Renderer) renderList(n *html.Node, width int) {
+func (r *Renderer) renderList(n *html.Node) {
 	for _, item := range n.Children {
 		text := item.PlainText()
-		lines := render.WrapText(text, width-4)
+		lines := render.WrapText(text, r.contentWidth-4)
 
 		for i, line := range lines {
 			if i == 0 {
-				r.writeLine(r.margin, r.y, "•", render.Style{})
-				r.writeLine(r.margin+2, r.y, line, render.Style{})
+				r.writeLine(r.leftMargin, r.y, "•", render.Style{})
+				r.writeLine(r.leftMargin+2, r.y, line, render.Style{})
 			} else {
-				r.writeLine(r.margin+2, r.y, line, render.Style{})
+				r.writeLine(r.leftMargin+2, r.y, line, render.Style{})
 			}
 			r.y++
 		}
@@ -182,21 +183,21 @@ func (r *Renderer) renderList(n *html.Node, width int) {
 	r.y++
 }
 
-func (r *Renderer) renderCodeBlock(text string, width int) {
+func (r *Renderer) renderCodeBlock(text string) {
 	lines := strings.Split(text, "\n")
 
-	r.canvas.DrawHLine(r.margin, r.y, width, render.SingleBox.Horizontal, render.Style{Dim: true})
+	r.canvas.DrawHLine(r.leftMargin, r.y, r.contentWidth, render.SingleBox.Horizontal, render.Style{Dim: true})
 	r.y++
 
 	for _, line := range lines {
-		if len(line) > width {
-			line = line[:width]
+		if len(line) > r.contentWidth {
+			line = line[:r.contentWidth]
 		}
-		r.writeLine(r.margin, r.y, line, render.Style{Dim: true})
+		r.writeLine(r.leftMargin, r.y, line, render.Style{Dim: true})
 		r.y++
 	}
 
-	r.canvas.DrawHLine(r.margin, r.y, width, render.SingleBox.Horizontal, render.Style{Dim: true})
+	r.canvas.DrawHLine(r.leftMargin, r.y, r.contentWidth, render.SingleBox.Horizontal, render.Style{Dim: true})
 	r.y++
 }
 
