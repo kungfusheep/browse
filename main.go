@@ -1,85 +1,146 @@
 // Browse is a terminal-based web browser focused on beautiful text layouts.
-//
-// Rather than recreating web pages visually, Browse reimagines them for the
-// terminal with justified text, box-drawing characters, and a 70s-80s
-// technical documentation aesthetic.
 package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 
+	"browse/document"
+	"browse/html"
 	"browse/render"
 )
 
 func main() {
-	if err := run(); err != nil {
+	url := "https://kungfusheep.com/articles/service-principles"
+	if len(os.Args) > 1 {
+		url = os.Args[1]
+	}
+
+	if err := run(url); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	// Get terminal dimensions
+func run(url string) error {
+	// Fetch the page
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("fetching %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	// Parse HTML
+	doc, err := html.Parse(resp.Body)
+	if err != nil {
+		return fmt.Errorf("parsing HTML: %w", err)
+	}
+
+	// Set up terminal
 	width, height, err := render.TerminalSize()
 	if err != nil {
 		return fmt.Errorf("detecting terminal: %w", err)
 	}
 
-	// Set up terminal for raw mode
 	term, err := render.NewTerminal(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("initializing terminal: %w", err)
 	}
 
-	// Enter alternate screen and raw mode
 	render.EnterAltScreen(os.Stdout)
 	if err := term.EnterRawMode(); err != nil {
 		render.ExitAltScreen(os.Stdout)
 		return fmt.Errorf("entering raw mode: %w", err)
 	}
 
-	// Ensure cleanup on exit
 	defer func() {
 		term.RestoreMode()
 		render.ExitAltScreen(os.Stdout)
 	}()
 
-	// Create canvas
+	// Create canvas and renderer
 	canvas := render.NewCanvas(width, height)
+	renderer := document.NewRenderer(canvas)
 
-	// For now: render a welcome screen
-	renderWelcome(canvas)
+	// Calculate content height for scrolling
+	contentHeight := renderer.ContentHeight(doc)
+	maxScroll := contentHeight - height
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scrollY := 0
+
+	// Initial render
+	renderer.Render(doc, scrollY)
 	canvas.RenderTo(os.Stdout)
 
-	// Wait for 'q' to quit
-	buf := make([]byte, 1)
+	// Input loop
+	buf := make([]byte, 3)
 	for {
 		n, _ := os.Stdin.Read(buf)
-		if n > 0 && buf[0] == 'q' {
-			break
+		if n == 0 {
+			continue
 		}
-	}
 
-	return nil
-}
+		switch {
+		case buf[0] == 'q':
+			return nil
 
-func renderWelcome(c *render.Canvas) {
-	c.Clear()
+		case buf[0] == 'j', buf[0] == 14: // j or Ctrl+N
+			scrollY++
+			if scrollY > maxScroll {
+				scrollY = maxScroll
+			}
 
-	// Title
-	title := " BROWSE "
-	c.DrawBoxWithTitle(0, 0, c.Width(), 3, title, render.DoubleBox, render.Style{}, render.Style{Bold: true})
+		case buf[0] == 'k', buf[0] == 16: // k or Ctrl+P
+			scrollY--
+			if scrollY < 0 {
+				scrollY = 0
+			}
 
-	// Welcome text
-	text := `Welcome to Browse, a terminal web browser that reimagines web content for the terminal.
+		case buf[0] == 'd', buf[0] == 4: // d or Ctrl+D
+			scrollY += height / 2
+			if scrollY > maxScroll {
+				scrollY = maxScroll
+			}
 
-Press 'q' to quit.`
+		case buf[0] == 'u', buf[0] == 21: // u or Ctrl+U
+			scrollY -= height / 2
+			if scrollY < 0 {
+				scrollY = 0
+			}
 
-	lines := render.WrapAndJustify(text, c.Width()-4)
-	y := 5
-	for _, line := range lines {
-		c.WriteString(2, y, line, render.Style{})
-		y++
+		case buf[0] == 'g': // top
+			scrollY = 0
+
+		case buf[0] == 'G': // bottom
+			scrollY = maxScroll
+
+		case buf[0] == ' ': // page down
+			scrollY += height - 2
+			if scrollY > maxScroll {
+				scrollY = maxScroll
+			}
+
+		case buf[0] == 27 && n == 3: // escape sequences
+			if buf[1] == '[' {
+				switch buf[2] {
+				case 'A': // up arrow
+					scrollY--
+					if scrollY < 0 {
+						scrollY = 0
+					}
+				case 'B': // down arrow
+					scrollY++
+					if scrollY > maxScroll {
+						scrollY = maxScroll
+					}
+				}
+			}
+		}
+
+		renderer.Render(doc, scrollY)
+		canvas.RenderTo(os.Stdout)
 	}
 }
