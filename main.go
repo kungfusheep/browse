@@ -7,6 +7,7 @@ import (
 	neturl "net/url"
 	"os"
 	"strings"
+	"time"
 
 	"browse/document"
 	"browse/html"
@@ -85,6 +86,7 @@ func run(url string) error {
 	jumpMode := false
 	inputMode := false   // selecting an input field
 	textEntry := false   // entering text into a field
+	tocMode := false     // showing table of contents
 	jumpInput := ""
 	var labels []string
 	var activeInput *document.Input // currently selected input
@@ -93,6 +95,29 @@ func run(url string) error {
 	// Render helper
 	redraw := func() {
 		renderer.Render(doc, scrollY)
+
+		// Draw scroll indicator on right edge
+		if contentHeight > height {
+			// Calculate thumb position and size
+			thumbHeight := height * height / contentHeight
+			if thumbHeight < 1 {
+				thumbHeight = 1
+			}
+			thumbPos := 0
+			if maxScroll > 0 {
+				thumbPos = scrollY * (height - thumbHeight) / maxScroll
+			}
+
+			// Draw track and thumb
+			for y := 0; y < height; y++ {
+				if y >= thumbPos && y < thumbPos+thumbHeight {
+					canvas.Set(width-1, y, '█', render.Style{Dim: true})
+				} else {
+					canvas.Set(width-1, y, '│', render.Style{Dim: true})
+				}
+			}
+		}
+
 		if jumpMode {
 			labels = document.GenerateLabels(len(renderer.Links()))
 			renderer.RenderLinkLabels(labels)
@@ -100,6 +125,10 @@ func run(url string) error {
 		if inputMode {
 			labels = document.GenerateLabels(len(renderer.Inputs()))
 			renderer.RenderInputLabels(labels)
+		}
+		if tocMode {
+			labels = document.GenerateLabels(len(renderer.Headings()))
+			renderer.RenderTOC(labels)
 		}
 		if textEntry && activeInput != nil {
 			// Draw text entry prompt at bottom of screen
@@ -289,6 +318,59 @@ func run(url string) error {
 			continue
 		}
 
+		// TOC mode input handling
+		if tocMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel TOC mode
+				tocMode = false
+				jumpInput = ""
+				redraw()
+
+			case buf[0] >= 'a' && buf[0] <= 'z':
+				jumpInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				headings := renderer.Headings()
+				for i, label := range labels {
+					if label == jumpInput && i < len(headings) {
+						// Found a match - jump to heading!
+						matched = true
+						tocMode = false
+						jumpInput = ""
+
+						// Scroll to heading position
+						scrollY = headings[i].Y
+						if scrollY > maxScroll {
+							scrollY = maxScroll
+						}
+						if scrollY < 0 {
+							scrollY = 0
+						}
+						redraw()
+						break
+					}
+				}
+
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						tocMode = false
+						jumpInput = ""
+						redraw()
+					}
+				}
+			}
+			continue
+		}
+
 		// Normal mode
 		switch {
 		case buf[0] == 'q':
@@ -298,6 +380,13 @@ func run(url string) error {
 			jumpMode = true
 			jumpInput = ""
 			redraw()
+
+		case buf[0] == 't': // table of contents
+			if len(renderer.Headings()) > 0 {
+				tocMode = true
+				jumpInput = ""
+				redraw()
+			}
 
 		case buf[0] == 'i': // input - enter input mode
 			if len(renderer.Inputs()) > 0 {
@@ -406,24 +495,48 @@ func run(url string) error {
 }
 
 func fetchAndParse(url string) (*html.Node, error) {
+	// Start spinner in background
+	done := make(chan bool)
+	go showSpinner(done)
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		done <- true
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		done <- true
 		return nil, fmt.Errorf("fetching %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	doc, err := html.Parse(resp.Body)
+	done <- true
 	if err != nil {
 		return nil, fmt.Errorf("parsing HTML: %w", err)
 	}
 
 	return doc, nil
+}
+
+func showSpinner(done chan bool) {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	i := 0
+	for {
+		select {
+		case <-done:
+			// Clear spinner
+			fmt.Print("\r   \r")
+			return
+		default:
+			fmt.Printf("\r%s", frames[i%len(frames)])
+			i++
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
 }
 
 func resolveURL(base, href string) string {
@@ -478,6 +591,7 @@ func landingPage() (*html.Node, error) {
 <strong>d/u</strong> - half page down/up |
 <strong>g/G</strong> - top/bottom |
 <strong>f</strong> - follow link |
+<strong>t</strong> - table of contents |
 <strong>b</strong> - back |
 <strong>H</strong> - home |
 <strong>i</strong> - input field |

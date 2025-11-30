@@ -28,6 +28,14 @@ type Input struct {
 	FormMethod string // GET or POST
 }
 
+// Heading represents a section heading for table of contents.
+type Heading struct {
+	Level  int    // 1, 2, or 3
+	Number string // e.g., "1.2.3"
+	Text   string // heading text
+	Y      int    // line position in document
+}
+
 // Renderer converts HTML nodes to canvas output.
 type Renderer struct {
 	canvas       *render.Canvas
@@ -36,6 +44,7 @@ type Renderer struct {
 	y            int
 	links        []Link
 	inputs       []Input
+	headings     []Heading
 
 	// Current form context (for inputs)
 	currentFormAction string
@@ -72,8 +81,9 @@ func NewRenderer(c *render.Canvas) *Renderer {
 func (r *Renderer) Render(doc *html.Node, scrollY int) {
 	r.canvas.Clear()
 	r.y = -scrollY
-	r.links = nil  // reset links for this render
-	r.inputs = nil // reset inputs for this render
+	r.links = nil    // reset links for this render
+	r.inputs = nil   // reset inputs for this render
+	r.headings = nil // reset headings for this render
 
 	// Reset form context
 	r.currentFormAction = ""
@@ -97,6 +107,11 @@ func (r *Renderer) Links() []Link {
 // Inputs returns the visible input fields from the last render.
 func (r *Renderer) Inputs() []Input {
 	return r.inputs
+}
+
+// Headings returns the section headings from the last render.
+func (r *Renderer) Headings() []Heading {
+	return r.headings
 }
 
 // ContentHeight returns the total height needed for the document.
@@ -167,6 +182,9 @@ func (r *Renderer) renderNode(n *html.Node) {
 	}
 }
 
+// sectionNumWidth is the fixed width for right-aligned section numbers
+const sectionNumWidth = 8 // fits "1.1.1.  " with padding
+
 func (r *Renderer) renderHeading1(n *html.Node) {
 	r.h1Count++
 	r.h2Count = 0
@@ -183,23 +201,34 @@ func (r *Renderer) renderHeading1(n *html.Node) {
 	text := n.Text
 	href := r.findHeadingLink(n)
 
-	// Section number + SMALL CAPS style (uppercase)
+	// Section number (right-aligned, dimmed) + SMALL CAPS title (bold)
 	displayText := strings.ToUpper(text)
-	fullText := fmt.Sprintf("%d. %s", r.h1Count, displayText)
+	sectionNum := fmt.Sprintf("%d.", r.h1Count)
+	paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum) // right-align with 2 space gap
 
-	r.writeLine(r.leftMargin, r.y, fullText, render.Style{Bold: true})
+	// Track heading for TOC
+	r.headings = append(r.headings, Heading{
+		Level:  1,
+		Number: sectionNum,
+		Text:   text,
+		Y:      r.y,
+	})
+
+	// Draw section number (dimmed) then title (bold)
+	r.writeLine(r.leftMargin, r.y, paddedNum, render.Style{Dim: true})
+	r.writeLine(r.leftMargin+sectionNumWidth, r.y, displayText, render.Style{Bold: true})
 
 	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 		r.links = append(r.links, Link{
 			Href:   href,
-			X:      r.leftMargin,
+			X:      r.leftMargin + sectionNumWidth,
 			Y:      r.y,
-			Length: render.StringWidth(fullText),
+			Length: render.StringWidth(displayText),
 		})
 	}
 
 	r.y++
-	r.canvas.DrawHLine(r.leftMargin, r.y, render.StringWidth(fullText), render.DoubleBox.Horizontal, render.Style{})
+	r.canvas.DrawHLine(r.leftMargin+sectionNumWidth, r.y, render.StringWidth(displayText), render.DoubleBox.Horizontal, render.Style{})
 	r.y += 2
 }
 
@@ -211,28 +240,39 @@ func (r *Renderer) renderHeading2(n *html.Node) {
 	text := n.Text
 	href := r.findHeadingLink(n)
 
-	// Section number + title
-	var fullText string
+	// Section number (right-aligned, dimmed) + title (bold)
+	var sectionNum string
 	if r.h1Count > 0 {
-		fullText = fmt.Sprintf("%d.%d  %s", r.h1Count, r.h2Count, text)
+		sectionNum = fmt.Sprintf("%d.%d", r.h1Count, r.h2Count)
 	} else {
-		fullText = fmt.Sprintf("%d. %s", r.h2Count, text)
+		sectionNum = fmt.Sprintf("%d.", r.h2Count)
 	}
+	paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum)
 
-	r.writeLine(r.leftMargin, r.y, fullText, render.Style{Bold: true})
+	// Track heading for TOC
+	r.headings = append(r.headings, Heading{
+		Level:  2,
+		Number: sectionNum,
+		Text:   text,
+		Y:      r.y,
+	})
+
+	// Draw section number (dimmed) then title (bold)
+	r.writeLine(r.leftMargin, r.y, paddedNum, render.Style{Dim: true})
+	r.writeLine(r.leftMargin+sectionNumWidth, r.y, text, render.Style{Bold: true})
 
 	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 		r.links = append(r.links, Link{
 			Href:   href,
-			X:      r.leftMargin,
+			X:      r.leftMargin + sectionNumWidth,
 			Y:      r.y,
-			Length: render.StringWidth(fullText),
+			Length: render.StringWidth(text),
 		})
 	}
 
-	// Single line under h2
+	// Single line under h2 (under title only)
 	r.y++
-	r.canvas.DrawHLine(r.leftMargin, r.y, render.StringWidth(fullText), render.SingleBox.Horizontal, render.Style{Dim: true})
+	r.canvas.DrawHLine(r.leftMargin+sectionNumWidth, r.y, render.StringWidth(text), render.SingleBox.Horizontal, render.Style{Dim: true})
 	r.y += 2
 }
 
@@ -242,25 +282,52 @@ func (r *Renderer) renderHeading3(n *html.Node) {
 	text := n.Text
 	href := r.findHeadingLink(n)
 
-	// Section number + title
-	var fullText string
+	// Section number (right-aligned, dimmed) + title (bold, underlined)
+	var sectionNum string
 	if r.h1Count > 0 && r.h2Count > 0 {
-		fullText = fmt.Sprintf("%d.%d.%d  %s", r.h1Count, r.h2Count, r.h3Count, text)
+		sectionNum = fmt.Sprintf("%d.%d.%d", r.h1Count, r.h2Count, r.h3Count)
 	} else if r.h2Count > 0 {
-		fullText = fmt.Sprintf("%d.%d  %s", r.h2Count, r.h3Count, text)
+		sectionNum = fmt.Sprintf("%d.%d", r.h2Count, r.h3Count)
 	} else {
-		fullText = text
+		sectionNum = ""
 	}
 
-	r.writeLine(r.leftMargin, r.y, fullText, render.Style{Bold: true, Underline: true})
-
-	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
-		r.links = append(r.links, Link{
-			Href:   href,
-			X:      r.leftMargin,
+	// Track heading for TOC (only if it has a section number)
+	if sectionNum != "" {
+		r.headings = append(r.headings, Heading{
+			Level:  3,
+			Number: sectionNum,
+			Text:   text,
 			Y:      r.y,
-			Length: render.StringWidth(fullText),
 		})
+	}
+
+	// Draw with right-aligned section number pattern
+	if sectionNum != "" {
+		paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum)
+		r.writeLine(r.leftMargin, r.y, paddedNum, render.Style{Dim: true})
+		r.writeLine(r.leftMargin+sectionNumWidth, r.y, text, render.Style{Bold: true, Underline: true})
+
+		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
+			r.links = append(r.links, Link{
+				Href:   href,
+				X:      r.leftMargin + sectionNumWidth,
+				Y:      r.y,
+				Length: render.StringWidth(text),
+			})
+		}
+	} else {
+		// No section number - just render title
+		r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true, Underline: true})
+
+		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
+			r.links = append(r.links, Link{
+				Href:   href,
+				X:      r.leftMargin,
+				Y:      r.y,
+				Length: render.StringWidth(text),
+			})
+		}
 	}
 
 	r.y += 2
@@ -662,15 +729,18 @@ func GenerateLabels(count int) []string {
 	keys := []byte("asdfghjkl")
 	labels := make([]string, 0, count)
 
-	// Single character labels first
-	for _, k := range keys {
-		if len(labels) >= count {
-			return labels
+	// If we can fit in single chars, use them
+	if count <= len(keys) {
+		for _, k := range keys {
+			if len(labels) >= count {
+				return labels
+			}
+			labels = append(labels, string(k))
 		}
-		labels = append(labels, string(k))
+		return labels
 	}
 
-	// Two character labels
+	// Otherwise ALL labels are two characters (no mixing)
 	for _, k1 := range keys {
 		for _, k2 := range keys {
 			if len(labels) >= count {
@@ -721,4 +791,81 @@ func (r *Renderer) RenderInputLabels(labels []string) {
 			}
 		}
 	}
+}
+
+// RenderTOC draws a table of contents overlay.
+// Returns jump labels for each heading so the caller can handle selection.
+func (r *Renderer) RenderTOC(labels []string) {
+	if len(r.headings) == 0 {
+		return
+	}
+
+	height := r.canvas.Height()
+	width := r.canvas.Width()
+
+	// Calculate TOC box dimensions
+	tocWidth := 60
+	if tocWidth > width-4 {
+		tocWidth = width - 4
+	}
+	tocHeight := len(r.headings) + 4 // headings + title + borders + padding
+	if tocHeight > height-4 {
+		tocHeight = height - 4
+	}
+
+	// Center the TOC box
+	startX := (width - tocWidth) / 2
+	startY := (height - tocHeight) / 2
+
+	// Draw box background (clear area)
+	for y := startY; y < startY+tocHeight; y++ {
+		for x := startX; x < startX+tocWidth; x++ {
+			r.canvas.Set(x, y, ' ', render.Style{})
+		}
+	}
+
+	// Draw border
+	r.canvas.DrawBox(startX, startY, tocWidth, tocHeight, render.DoubleBox, render.Style{})
+
+	// Title
+	title := " Table of Contents "
+	titleX := startX + (tocWidth-len(title))/2
+	r.canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+	// Draw headings with labels
+	y := startY + 2
+	maxHeadings := tocHeight - 4
+	for i, heading := range r.headings {
+		if i >= maxHeadings || i >= len(labels) {
+			break
+		}
+
+		// Indent based on level
+		indent := (heading.Level - 1) * 2
+		x := startX + 2 + indent
+
+		// Format: [label] number  text
+		label := labels[i]
+		text := heading.Text
+		maxTextWidth := tocWidth - 8 - indent - len(label)
+		if len(text) > maxTextWidth {
+			text = text[:maxTextWidth-3] + "..."
+		}
+
+		// Draw label
+		for j, ch := range label {
+			r.canvas.Set(x+j, y, ch, render.Style{Reverse: true, Bold: true})
+		}
+
+		// Draw section number and text
+		line := fmt.Sprintf(" %s  %s", heading.Number, text)
+		r.canvas.WriteString(x+len(label), y, line, render.Style{})
+
+		y++
+	}
+
+	// Footer hint
+	hint := " Press label to jump, ESC to close "
+	hintX := startX + (tocWidth-len(hint))/2
+	r.canvas.WriteString(hintX, startY+tocHeight-1, hint, render.Style{Dim: true})
 }
