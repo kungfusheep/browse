@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 )
 
 func main() {
-	url := "https://kungfusheep.com/articles/service-principles"
+	url := ""
 	if len(os.Args) > 1 {
 		url = os.Args[1]
 	}
@@ -25,8 +26,17 @@ func main() {
 }
 
 func run(url string) error {
-	// Fetch the page
-	doc, err := fetchAndParse(url)
+	var doc *html.Node
+	var err error
+
+	if url == "" {
+		// Show landing page
+		doc, err = landingPage()
+		url = "browse://home"
+	} else {
+		// Fetch the page
+		doc, err = fetchAndParse(url)
+	}
 	if err != nil {
 		return err
 	}
@@ -57,6 +67,14 @@ func run(url string) error {
 	canvas := render.NewCanvas(width, height)
 	renderer := document.NewRenderer(canvas)
 
+	// History for back navigation
+	type historyEntry struct {
+		url     string
+		doc     *html.Node
+		scrollY int
+	}
+	var history []historyEntry
+
 	// State
 	contentHeight := renderer.ContentHeight(doc)
 	maxScroll := contentHeight - height
@@ -65,8 +83,12 @@ func run(url string) error {
 	}
 	scrollY := 0
 	jumpMode := false
+	inputMode := false   // selecting an input field
+	textEntry := false   // entering text into a field
 	jumpInput := ""
 	var labels []string
+	var activeInput *document.Input // currently selected input
+	var enteredText string          // text being entered
 
 	// Render helper
 	redraw := func() {
@@ -74,6 +96,18 @@ func run(url string) error {
 		if jumpMode {
 			labels = document.GenerateLabels(len(renderer.Links()))
 			renderer.RenderLinkLabels(labels)
+		}
+		if inputMode {
+			labels = document.GenerateLabels(len(renderer.Inputs()))
+			renderer.RenderInputLabels(labels)
+		}
+		if textEntry && activeInput != nil {
+			// Draw text entry prompt at bottom of screen
+			prompt := fmt.Sprintf(" %s: %s█ ", activeInput.Name, enteredText)
+			for x := 0; x < width; x++ {
+				canvas.Set(x, height-1, ' ', render.Style{Reverse: true})
+			}
+			canvas.WriteString(0, height-1, prompt, render.Style{Reverse: true, Bold: true})
 		}
 		canvas.RenderTo(os.Stdout)
 	}
@@ -99,17 +133,25 @@ func run(url string) error {
 			case buf[0] >= 'a' && buf[0] <= 'z':
 				jumpInput += string(buf[0])
 
-				// Check for match
+				// Check for exact match
+				matched := false
 				links := renderer.Links()
 				for i, label := range labels {
 					if label == jumpInput && i < len(links) {
 						// Found a match - navigate!
+						matched = true
 						jumpMode = false
 						jumpInput = ""
 
 						newURL := resolveURL(url, links[i].Href)
 						newDoc, err := fetchAndParse(newURL)
 						if err == nil {
+							// Push current page to history before navigating
+							history = append(history, historyEntry{
+								url:     url,
+								doc:     doc,
+								scrollY: scrollY,
+							})
 							doc = newDoc
 							url = newURL
 							contentHeight = renderer.ContentHeight(doc)
@@ -124,19 +166,125 @@ func run(url string) error {
 					}
 				}
 
-				// Check if input could still match something
-				couldMatch := false
-				for _, label := range labels {
-					if strings.HasPrefix(label, jumpInput) {
-						couldMatch = true
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						jumpMode = false
+						jumpInput = ""
+						redraw()
+					}
+				}
+			}
+			continue
+		}
+
+		// Input selection mode handling
+		if inputMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel input mode
+				inputMode = false
+				jumpInput = ""
+				redraw()
+
+			case buf[0] >= 'a' && buf[0] <= 'z':
+				jumpInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				inputs := renderer.Inputs()
+				for i, label := range labels {
+					if label == jumpInput && i < len(inputs) {
+						// Found a match - enter text entry mode
+						matched = true
+						inputMode = false
+						jumpInput = ""
+						textEntry = true
+						activeInput = &inputs[i]
+						enteredText = ""
+						redraw()
 						break
 					}
 				}
-				if !couldMatch {
-					jumpMode = false
-					jumpInput = ""
+
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						inputMode = false
+						jumpInput = ""
+						redraw()
+					}
+				}
+			}
+			continue
+		}
+
+		// Text entry mode handling
+		if textEntry {
+			switch {
+			case buf[0] == 27: // Escape - cancel text entry
+				textEntry = false
+				activeInput = nil
+				enteredText = ""
+				redraw()
+
+			case buf[0] == 13 || buf[0] == 10: // Enter - submit form
+				if activeInput != nil && activeInput.FormAction != "" {
+					// Build the URL with query parameter (URL-encoded)
+					formURL := resolveURL(url, activeInput.FormAction)
+					if strings.Contains(formURL, "?") {
+						formURL += "&"
+					} else {
+						formURL += "?"
+					}
+					formURL += activeInput.Name + "=" + neturl.QueryEscape(enteredText)
+
+					textEntry = false
+
+					// Navigate to the form result
+					newDoc, err := fetchAndParse(formURL)
+					if err == nil {
+						history = append(history, historyEntry{
+							url:     url,
+							doc:     doc,
+							scrollY: scrollY,
+						})
+						doc = newDoc
+						url = formURL
+						contentHeight = renderer.ContentHeight(doc)
+						maxScroll = contentHeight - height
+						if maxScroll < 0 {
+							maxScroll = 0
+						}
+						scrollY = 0
+					}
+					activeInput = nil
+					enteredText = ""
+				}
+				redraw()
+
+			case buf[0] == 127 || buf[0] == 8: // Backspace
+				if len(enteredText) > 0 {
+					enteredText = enteredText[:len(enteredText)-1]
 					redraw()
 				}
+
+			case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
+				enteredText += string(buf[0])
+				redraw()
 			}
 			continue
 		}
@@ -150,6 +298,49 @@ func run(url string) error {
 			jumpMode = true
 			jumpInput = ""
 			redraw()
+
+		case buf[0] == 'i': // input - enter input mode
+			if len(renderer.Inputs()) > 0 {
+				inputMode = true
+				jumpInput = ""
+				redraw()
+			}
+
+		case buf[0] == 'b': // back
+			if len(history) > 0 {
+				// Pop from history
+				prev := history[len(history)-1]
+				history = history[:len(history)-1]
+
+				url = prev.url
+				doc = prev.doc
+				scrollY = prev.scrollY
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				redraw()
+			}
+
+		case buf[0] == 'H': // home
+			homeDoc, err := landingPage()
+			if err == nil {
+				history = append(history, historyEntry{
+					url:     url,
+					doc:     doc,
+					scrollY: scrollY,
+				})
+				doc = homeDoc
+				url = "browse://home"
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				scrollY = 0
+				redraw()
+			}
 
 		case buf[0] == 'j', buf[0] == 14:
 			scrollY++
@@ -215,7 +406,13 @@ func run(url string) error {
 }
 
 func fetchAndParse(url string) (*html.Node, error) {
-	resp, err := http.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching %s: %w", url, err)
 	}
@@ -264,4 +461,61 @@ func resolveURL(base, href string) string {
 		return base + "/" + href
 	}
 	return base[:lastSlash+1] + href
+}
+
+func landingPage() (*html.Node, error) {
+	page := `<!DOCTYPE html>
+<html>
+<head><title>Browse - Terminal Web Browser</title></head>
+<body>
+<article>
+<h1>Browse</h1>
+<p>A terminal-based web browser for reading the web in beautiful monospace.</p>
+
+<h2>Navigation</h2>
+<p>
+<strong>j/k</strong> - scroll down/up |
+<strong>d/u</strong> - half page down/up |
+<strong>g/G</strong> - top/bottom |
+<strong>f</strong> - follow link |
+<strong>b</strong> - back |
+<strong>H</strong> - home |
+<strong>i</strong> - input field |
+<strong>q</strong> - quit
+</p>
+
+<h2>News</h2>
+<ul>
+<li><a href="https://text.npr.org">NPR Text</a> - National Public Radio (text version)</li>
+<li><a href="https://lite.cnn.com">CNN Lite</a> - CNN (lightweight version)</li>
+<li><a href="https://lobste.rs">Lobsters</a> - Computing-focused link aggregator</li>
+</ul>
+
+<h2>Reference</h2>
+<ul>
+<li><a href="https://en.wikipedia.org">Wikipedia</a> - The free encyclopedia</li>
+<li><a href="https://go.dev/doc/effective_go">Effective Go</a> - Go programming guide</li>
+<li><a href="https://man.archlinux.org">Arch Manual Pages</a> - Linux manual pages</li>
+</ul>
+
+<h2>Blogs</h2>
+<ul>
+<li><a href="https://kungfusheep.com/articles">kungfusheep</a> - Software engineering articles</li>
+<li><a href="https://blog.golang.org">Go Blog</a> - Official Go blog</li>
+<li><a href="https://jvns.ca">Julia Evans</a> - Programming zines and posts</li>
+<li><a href="https://danluu.com">Dan Luu</a> - Systems and performance</li>
+</ul>
+
+<h2>Tools</h2>
+<ul>
+<li><a href="https://wttr.in">wttr.in</a> - Weather in your terminal</li>
+<li><a href="https://example.com">example.com</a> - Test page</li>
+</ul>
+
+<p><em>Press 'f' to follow a link, or pass a URL as an argument.</em></p>
+</article>
+</body>
+</html>`
+
+	return html.ParseString(page)
 }

@@ -245,6 +245,12 @@ func JustifyLine(line string, width int) string {
 	}
 
 	baseSpaces := totalSpaces / gaps
+
+	// Don't justify if gaps would be too wide - looks ugly
+	if baseSpaces > 3 {
+		return padRight(line, width)
+	}
+
 	extraSpaces := totalSpaces % gaps
 
 	var sb strings.Builder

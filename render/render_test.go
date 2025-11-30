@@ -43,7 +43,8 @@ func TestJustifyLine(t *testing.T) {
 		width    int
 		expected string
 	}{
-		{"two words", "hello world", 15, "hello     world"},
+		{"two words small gap", "hello world", 13, "hello   world"},
+		{"two words wide gap left aligns", "hello world", 20, "hello world         "},
 		{"three words even", "one two three", 16, "one   two  three"},
 		{"single word stays left", "hello", 10, "hello     "},
 	}

@@ -14,6 +14,13 @@ type Node struct {
 	Text     string
 	Children []*Node
 	Href     string // for links
+
+	// Form fields
+	FormAction string // for forms
+	FormMethod string // GET or POST
+	InputName  string // for inputs
+	InputType  string // text, submit, etc.
+	InputValue string // default value or button label
 }
 
 // NodeType identifies the kind of content node.
@@ -34,6 +41,8 @@ const (
 	NodeText
 	NodeStrong
 	NodeEmphasis
+	NodeForm
+	NodeInput
 )
 
 // Parse extracts article content from HTML.
@@ -85,14 +94,17 @@ func extractContent(n *html.Node, parent *Node) {
 			switch c.Data {
 			case "h1":
 				node := &Node{Type: NodeHeading1, Text: textContent(c)}
+				extractHeadingLink(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "h2":
 				node := &Node{Type: NodeHeading2, Text: textContent(c)}
+				extractHeadingLink(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "h3", "h4", "h5", "h6":
 				node := &Node{Type: NodeHeading3, Text: textContent(c)}
+				extractHeadingLink(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "p":
@@ -114,12 +126,64 @@ func extractContent(n *html.Node, parent *Node) {
 				node := &Node{Type: NodeCodeBlock, Text: textContent(c)}
 				parent.Children = append(parent.Children, node)
 
-			case "article", "main", "section", "div", "header", "footer":
+			case "article", "main", "section", "div", "header", "footer", "nav", "span",
+				"center", "nobr", "table", "tbody", "tr", "td", "th", "b", "i", "u", "font":
 				extractContent(c, parent)
+
+			case "a":
+				// Standalone link (not inside a paragraph) - treat as a paragraph with a link
+				text := strings.TrimSpace(textContent(c))
+				if text != "" {
+					node := &Node{Type: NodeParagraph}
+					link := &Node{Type: NodeLink, Href: getAttr(c, "href")}
+					link.Children = append(link.Children, &Node{Type: NodeText, Text: text})
+					node.Children = append(node.Children, link)
+					parent.Children = append(parent.Children, node)
+				}
+
+			case "form":
+				// Extract form with its action
+				formNode := &Node{
+					Type:       NodeForm,
+					FormAction: getAttr(c, "action"),
+					FormMethod: strings.ToUpper(getAttr(c, "method")),
+				}
+				if formNode.FormMethod == "" {
+					formNode.FormMethod = "GET"
+				}
+				extractContent(c, formNode)
+				parent.Children = append(parent.Children, formNode)
+
+			case "input":
+				inputType := getAttr(c, "type")
+				if inputType == "" {
+					inputType = "text"
+				}
+				// Only capture visible text inputs and submit buttons
+				if inputType == "text" || inputType == "search" || inputType == "submit" {
+					node := &Node{
+						Type:       NodeInput,
+						InputName:  getAttr(c, "name"),
+						InputType:  inputType,
+						InputValue: getAttr(c, "value"),
+						Text:       getAttr(c, "placeholder"),
+					}
+					if node.Text == "" {
+						node.Text = getAttr(c, "title")
+					}
+					parent.Children = append(parent.Children, node)
+				}
 			}
 
 		case html.TextNode:
-			// Skip whitespace-only text at document level
+			// Capture significant text content not wrapped in elements
+			text := strings.TrimSpace(c.Data)
+			if text != "" && len(text) > 1 {
+				// Create an implicit paragraph for loose text
+				node := &Node{Type: NodeParagraph}
+				node.Children = append(node.Children, &Node{Type: NodeText, Text: text})
+				parent.Children = append(parent.Children, node)
+			}
 		}
 	}
 }
@@ -192,6 +256,19 @@ func getAttr(n *html.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+// extractHeadingLink finds a link inside a heading element and adds it as a child.
+func extractHeadingLink(n *html.Node, parent *Node) {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "a" {
+			link := &Node{Type: NodeLink, Href: getAttr(c, "href")}
+			parent.Children = append(parent.Children, link)
+			return
+		}
+		// Check nested elements
+		extractHeadingLink(c, parent)
+	}
 }
 
 // PlainText returns the plain text content of a node and its children.
