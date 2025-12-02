@@ -985,6 +985,11 @@ func landingPage() (*html.Document, error) {
 <li><a href="https://danluu.com">Dan Luu</a> - Systems and performance</li>
 </ul>
 
+<h2>Search</h2>
+<ul>
+<li><a href="https://html.duckduckgo.com/html/">DuckDuckGo</a> - Privacy-focused search (HTML version)</li>
+</ul>
+
 <h2>Tools</h2>
 <ul>
 <li><a href="https://wttr.in">wttr.in</a> - Weather in your terminal</li>
