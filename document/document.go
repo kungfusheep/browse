@@ -42,6 +42,7 @@ type Renderer struct {
 	contentWidth int
 	leftMargin   int
 	y            int
+	scrollY      int // current scroll offset for computing absolute positions
 	links        []Link
 	inputs       []Input
 	headings     []Heading
@@ -78,12 +79,13 @@ func NewRenderer(c *render.Canvas) *Renderer {
 }
 
 // Render draws the document to the canvas starting at the given y offset.
-func (r *Renderer) Render(doc *html.Node, scrollY int) {
+func (r *Renderer) Render(doc *html.Document, scrollY int) {
 	r.canvas.Clear()
 	r.y = -scrollY
-	r.links = nil    // reset links for this render
-	r.inputs = nil   // reset inputs for this render
-	r.headings = nil // reset headings for this render
+	r.scrollY = scrollY // store for computing absolute positions
+	r.links = nil       // reset links for this render
+	r.inputs = nil      // reset inputs for this render
+	r.headings = nil    // reset headings for this render
 
 	// Reset form context
 	r.currentFormAction = ""
@@ -94,7 +96,7 @@ func (r *Renderer) Render(doc *html.Node, scrollY int) {
 	r.h2Count = 0
 	r.h3Count = 0
 
-	for _, child := range doc.Children {
+	for _, child := range doc.Content.Children {
 		r.renderNode(child)
 	}
 }
@@ -115,10 +117,10 @@ func (r *Renderer) Headings() []Heading {
 }
 
 // ContentHeight returns the total height needed for the document.
-func (r *Renderer) ContentHeight(doc *html.Node) int {
+func (r *Renderer) ContentHeight(doc *html.Document) int {
 	height := 0
 
-	for _, child := range doc.Children {
+	for _, child := range doc.Content.Children {
 		height += r.nodeHeight(child, r.contentWidth)
 	}
 
@@ -206,29 +208,29 @@ func (r *Renderer) renderHeading1(n *html.Node) {
 	sectionNum := fmt.Sprintf("%d.", r.h1Count)
 	paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum) // right-align with 2 space gap
 
-	// Track heading for TOC
+	// Track heading for TOC (store absolute document position, not screen position)
 	r.headings = append(r.headings, Heading{
 		Level:  1,
 		Number: sectionNum,
 		Text:   text,
-		Y:      r.y,
+		Y:      r.y + r.scrollY,
 	})
 
-	// Draw section number (dimmed) then title (bold)
-	r.writeLine(r.leftMargin, r.y, paddedNum, render.Style{Dim: true})
-	r.writeLine(r.leftMargin+sectionNumWidth, r.y, displayText, render.Style{Bold: true})
+	// Draw section number in margin (dimmed), title at content start (bold)
+	r.writeLine(r.leftMargin-sectionNumWidth, r.y, paddedNum, render.Style{Dim: true})
+	r.writeLine(r.leftMargin, r.y, displayText, render.Style{Bold: true})
 
 	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 		r.links = append(r.links, Link{
 			Href:   href,
-			X:      r.leftMargin + sectionNumWidth,
+			X:      r.leftMargin,
 			Y:      r.y,
 			Length: render.StringWidth(displayText),
 		})
 	}
 
 	r.y++
-	r.canvas.DrawHLine(r.leftMargin+sectionNumWidth, r.y, render.StringWidth(displayText), render.DoubleBox.Horizontal, render.Style{})
+	r.canvas.DrawHLine(r.leftMargin, r.y, render.StringWidth(displayText), render.DoubleBox.Horizontal, render.Style{})
 	r.y += 2
 }
 
@@ -249,22 +251,22 @@ func (r *Renderer) renderHeading2(n *html.Node) {
 	}
 	paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum)
 
-	// Track heading for TOC
+	// Track heading for TOC (store absolute document position, not screen position)
 	r.headings = append(r.headings, Heading{
 		Level:  2,
 		Number: sectionNum,
 		Text:   text,
-		Y:      r.y,
+		Y:      r.y + r.scrollY,
 	})
 
-	// Draw section number (dimmed) then title (bold)
-	r.writeLine(r.leftMargin, r.y, paddedNum, render.Style{Dim: true})
-	r.writeLine(r.leftMargin+sectionNumWidth, r.y, text, render.Style{Bold: true})
+	// Draw section number in margin (dimmed), title at content start (bold)
+	r.writeLine(r.leftMargin-sectionNumWidth, r.y, paddedNum, render.Style{Dim: true})
+	r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true})
 
 	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 		r.links = append(r.links, Link{
 			Href:   href,
-			X:      r.leftMargin + sectionNumWidth,
+			X:      r.leftMargin,
 			Y:      r.y,
 			Length: render.StringWidth(text),
 		})
@@ -272,7 +274,7 @@ func (r *Renderer) renderHeading2(n *html.Node) {
 
 	// Single line under h2 (under title only)
 	r.y++
-	r.canvas.DrawHLine(r.leftMargin+sectionNumWidth, r.y, render.StringWidth(text), render.SingleBox.Horizontal, render.Style{Dim: true})
+	r.canvas.DrawHLine(r.leftMargin, r.y, render.StringWidth(text), render.SingleBox.Horizontal, render.Style{Dim: true})
 	r.y += 2
 }
 
@@ -293,25 +295,26 @@ func (r *Renderer) renderHeading3(n *html.Node) {
 	}
 
 	// Track heading for TOC (only if it has a section number)
+	// Store absolute document position, not screen position
 	if sectionNum != "" {
 		r.headings = append(r.headings, Heading{
 			Level:  3,
 			Number: sectionNum,
 			Text:   text,
-			Y:      r.y,
+			Y:      r.y + r.scrollY,
 		})
 	}
 
-	// Draw with right-aligned section number pattern
+	// Draw section number in margin (dimmed), title at content start (bold, underlined)
 	if sectionNum != "" {
 		paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum)
-		r.writeLine(r.leftMargin, r.y, paddedNum, render.Style{Dim: true})
-		r.writeLine(r.leftMargin+sectionNumWidth, r.y, text, render.Style{Bold: true, Underline: true})
+		r.writeLine(r.leftMargin-sectionNumWidth, r.y, paddedNum, render.Style{Dim: true})
+		r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true, Underline: true})
 
 		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 			r.links = append(r.links, Link{
 				Href:   href,
-				X:      r.leftMargin + sectionNumWidth,
+				X:      r.leftMargin,
 				Y:      r.y,
 				Length: render.StringWidth(text),
 			})
@@ -868,4 +871,166 @@ func (r *Renderer) RenderTOC(labels []string) {
 	hint := " Press label to jump, ESC to close "
 	hintX := startX + (tocWidth-len(hint))/2
 	r.canvas.WriteString(hintX, startY+tocHeight-1, hint, render.Style{Dim: true})
+}
+
+// NavLink represents a navigation link for the overlay.
+type NavLink struct {
+	Section string // section name (e.g., "Header", "Navigation")
+	Text    string // link text
+	Href    string // URL
+}
+
+// RenderNavigation draws a navigation overlay with all nav links.
+// scrollOffset controls which portion of the list is visible.
+func (r *Renderer) RenderNavigation(navSections []*html.Node, labels []string, scrollOffset int) []NavLink {
+	if len(navSections) == 0 {
+		return nil
+	}
+
+	// Flatten all nav links
+	var allLinks []NavLink
+	for _, section := range navSections {
+		sectionName := section.Text
+		for _, child := range section.Children {
+			if child.Type == html.NodeLink && child.Text != "" && child.Href != "" {
+				allLinks = append(allLinks, NavLink{
+					Section: sectionName,
+					Text:    child.Text,
+					Href:    child.Href,
+				})
+			}
+		}
+	}
+
+	if len(allLinks) == 0 {
+		return nil
+	}
+
+	height := r.canvas.Height()
+	width := r.canvas.Width()
+
+	// Calculate nav box dimensions - fixed height that fits screen
+	navWidth := 60
+	if navWidth > width-4 {
+		navWidth = width - 4
+	}
+	navHeight := height - 6 // Leave some margin
+	if navHeight < 10 {
+		navHeight = 10
+	}
+
+	// Center the nav box
+	startX := (width - navWidth) / 2
+	startY := (height - navHeight) / 2
+
+	// Draw box background (clear area)
+	for y := startY; y < startY+navHeight; y++ {
+		for x := startX; x < startX+navWidth; x++ {
+			r.canvas.Set(x, y, ' ', render.Style{})
+		}
+	}
+
+	// Draw border
+	r.canvas.DrawBox(startX, startY, navWidth, navHeight, render.DoubleBox, render.Style{})
+
+	// Title with scroll indicator
+	title := " Navigation "
+	if scrollOffset > 0 || len(allLinks) > navHeight-4 {
+		title = fmt.Sprintf(" Navigation (%d-%d of %d) ", scrollOffset+1,
+			min(scrollOffset+navHeight-4, len(allLinks)), len(allLinks))
+	}
+	titleX := startX + (navWidth-len(title))/2
+	r.canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+	// Available lines for content (inside border, minus title line and footer)
+	contentLines := navHeight - 4
+	y := startY + 2
+
+	// Skip links before scroll offset
+	linkIndex := 0
+	linesRendered := 0
+	currentSection := ""
+
+	// Find starting position accounting for section headers
+	for linkIndex < len(allLinks) && linkIndex < scrollOffset {
+		if allLinks[linkIndex].Section != currentSection {
+			currentSection = allLinks[linkIndex].Section
+		}
+		linkIndex++
+	}
+
+	// Reset section tracking for visible portion
+	if linkIndex > 0 && linkIndex < len(allLinks) {
+		// Show section header for first visible item if it's different
+		currentSection = ""
+	} else {
+		currentSection = ""
+	}
+
+	// Render visible links
+	for linkIndex < len(allLinks) && linesRendered < contentLines {
+		link := allLinks[linkIndex]
+		x := startX + 2
+
+		// Show section header when it changes
+		if link.Section != currentSection {
+			currentSection = link.Section
+			if linesRendered < contentLines {
+				sectionText := currentSection
+				if len(sectionText) > navWidth-6 {
+					sectionText = sectionText[:navWidth-9] + "..."
+				}
+				r.canvas.WriteString(x, y, sectionText, render.Style{Dim: true, Bold: true})
+				y++
+				linesRendered++
+				if linesRendered >= contentLines {
+					break
+				}
+			}
+		}
+
+		// Format: [label] text
+		if linkIndex < len(labels) {
+			label := labels[linkIndex]
+			text := link.Text
+			maxTextWidth := navWidth - 6 - len(label)
+			if maxTextWidth > 0 && len(text) > maxTextWidth {
+				text = text[:maxTextWidth-3] + "..."
+			}
+
+			// Draw label
+			for j, ch := range label {
+				r.canvas.Set(x+j, y, ch, render.Style{Reverse: true, Bold: true})
+			}
+
+			// Draw link text
+			r.canvas.WriteString(x+len(label)+1, y, text, render.Style{Underline: true})
+		}
+
+		y++
+		linesRendered++
+		linkIndex++
+	}
+
+	// Footer hint
+	hint := " j/k scroll, label to follow, ESC close "
+	hintX := startX + (navWidth-len(hint))/2
+	r.canvas.WriteString(hintX, startY+navHeight-1, hint, render.Style{Dim: true})
+
+	// Draw scroll indicators
+	if scrollOffset > 0 {
+		r.canvas.WriteString(startX+navWidth-3, startY+1, "▲", render.Style{Bold: true})
+	}
+	if linkIndex < len(allLinks) {
+		r.canvas.WriteString(startX+navWidth-3, startY+navHeight-2, "▼", render.Style{Bold: true})
+	}
+
+	return allLinks
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

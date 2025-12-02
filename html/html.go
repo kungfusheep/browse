@@ -8,6 +8,12 @@ import (
 	"golang.org/x/net/html"
 )
 
+// Document represents a parsed HTML document with separate content and navigation.
+type Document struct {
+	Content    *Node   // Main article content
+	Navigation []*Node // Navigation elements (nav, header, footer links)
+}
+
 // Node represents a content node in the document.
 type Node struct {
 	Type     NodeType
@@ -43,35 +49,46 @@ const (
 	NodeEmphasis
 	NodeForm
 	NodeInput
+	NodeNavSection // A navigation section (from nav, header, footer)
 )
 
-// Parse extracts article content from HTML.
-func Parse(r io.Reader) (*Node, error) {
+// Parse extracts article content from HTML, returning a Document with
+// main content and navigation elements separated.
+func Parse(r io.Reader) (*Document, error) {
 	doc, err := html.Parse(r)
 	if err != nil {
 		return nil, err
 	}
 
-	root := &Node{Type: NodeDocument}
+	result := &Document{
+		Content: &Node{Type: NodeDocument},
+	}
 
-	// Find the article element
+	// Find the body element to extract navigation from the whole page
+	body := findElement(doc, "body")
+	if body == nil {
+		body = doc
+	}
+
+	// First pass: extract all navigation elements from the entire body
+	extractNavigation(body, result)
+
+	// Find the article element for main content
 	article := findElement(doc, "article")
 	if article == nil {
 		article = findElement(doc, "main")
 	}
 	if article == nil {
-		article = findElement(doc, "body")
-	}
-	if article == nil {
-		article = doc
+		article = body
 	}
 
-	extractContent(article, root)
-	return root, nil
+	// Second pass: extract content (navigation will be skipped)
+	extractContentOnly(article, result.Content)
+	return result, nil
 }
 
 // ParseString parses HTML from a string.
-func ParseString(s string) (*Node, error) {
+func ParseString(s string) (*Document, error) {
 	return Parse(strings.NewReader(s))
 }
 
@@ -87,7 +104,26 @@ func findElement(n *html.Node, tag string) *html.Node {
 	return nil
 }
 
-func extractContent(n *html.Node, parent *Node) {
+// extractNavigation walks the tree and extracts all navigation elements.
+func extractNavigation(n *html.Node, doc *Document) {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode {
+			switch c.Data {
+			case "nav", "header", "footer", "aside", "menu":
+				navNode := extractNavLinks(c)
+				if navNode != nil && len(navNode.Children) > 0 {
+					doc.Navigation = append(doc.Navigation, navNode)
+				}
+			default:
+				// Recurse into other elements to find nested nav elements
+				extractNavigation(c, doc)
+			}
+		}
+	}
+}
+
+// extractContentOnly extracts content, skipping navigation elements.
+func extractContentOnly(n *html.Node, parent *Node) {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		switch c.Type {
 		case html.ElementNode:
@@ -114,7 +150,7 @@ func extractContent(n *html.Node, parent *Node) {
 
 			case "blockquote":
 				node := &Node{Type: NodeBlockquote}
-				extractContent(c, node)
+				extractContentOnly(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "ul", "ol":
@@ -126,9 +162,13 @@ func extractContent(n *html.Node, parent *Node) {
 				node := &Node{Type: NodeCodeBlock, Text: textContent(c)}
 				parent.Children = append(parent.Children, node)
 
-			case "article", "main", "section", "div", "header", "footer", "nav", "span",
+			case "nav", "header", "footer", "aside", "menu":
+				// Skip navigation elements (already extracted)
+				continue
+
+			case "article", "main", "section", "div", "span",
 				"center", "nobr", "table", "tbody", "tr", "td", "th", "b", "i", "u", "font":
-				extractContent(c, parent)
+				extractContentOnly(c, parent)
 
 			case "a":
 				// Standalone link (not inside a paragraph) - treat as a paragraph with a link
@@ -151,7 +191,7 @@ func extractContent(n *html.Node, parent *Node) {
 				if formNode.FormMethod == "" {
 					formNode.FormMethod = "GET"
 				}
-				extractContent(c, formNode)
+				extractContentOnly(c, formNode)
 				parent.Children = append(parent.Children, formNode)
 
 			case "input":
@@ -185,6 +225,59 @@ func extractContent(n *html.Node, parent *Node) {
 				parent.Children = append(parent.Children, node)
 			}
 		}
+	}
+}
+
+// extractNavLinks extracts all links from a navigation element.
+func extractNavLinks(n *html.Node) *Node {
+	navNode := &Node{
+		Type: NodeNavSection,
+		Text: getNavLabel(n), // Try to get aria-label or similar
+	}
+
+	var extractLinks func(*html.Node)
+	extractLinks = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			text := strings.TrimSpace(textContent(node))
+			href := getAttr(node, "href")
+			if text != "" && href != "" {
+				link := &Node{
+					Type: NodeLink,
+					Href: href,
+					Text: text,
+				}
+				navNode.Children = append(navNode.Children, link)
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			extractLinks(c)
+		}
+	}
+
+	extractLinks(n)
+	return navNode
+}
+
+// getNavLabel tries to find a label for the navigation element.
+func getNavLabel(n *html.Node) string {
+	// Try aria-label first
+	if label := getAttr(n, "aria-label"); label != "" {
+		return label
+	}
+	// Try the element name
+	switch n.Data {
+	case "nav":
+		return "Navigation"
+	case "header":
+		return "Header"
+	case "footer":
+		return "Footer"
+	case "aside":
+		return "Sidebar"
+	case "menu":
+		return "Menu"
+	default:
+		return "Links"
 	}
 }
 

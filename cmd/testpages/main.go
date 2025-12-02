@@ -63,13 +63,25 @@ func testURL(url string) {
 	}
 
 	// Count content types
-	stats := countNodes(doc)
+	stats := countNodes(doc.Content)
 	fmt.Printf("  Content: %d h1, %d h2, %d h3, %d paragraphs, %d lists, %d blockquotes, %d code blocks\n",
 		stats["h1"], stats["h2"], stats["h3"], stats["p"], stats["list"], stats["blockquote"], stats["code"])
 
 	// Count links
-	linkCount := countLinks(doc)
+	linkCount := countLinks(doc.Content)
 	fmt.Printf("  Links: %d\n", linkCount)
+
+	// Show navigation sections
+	if len(doc.Navigation) > 0 {
+		fmt.Printf("  Navigation sections: %d\n", len(doc.Navigation))
+		for i, nav := range doc.Navigation {
+			if i >= 3 {
+				fmt.Printf("    ... and %d more\n", len(doc.Navigation)-3)
+				break
+			}
+			fmt.Printf("    [%s] %d links\n", nav.Text, len(nav.Children))
+		}
+	}
 
 	// Render to a test canvas (600 lines to see more links)
 	canvas := render.NewCanvas(80, 600)
