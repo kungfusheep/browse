@@ -189,11 +189,13 @@ func (c *Canvas) RenderTo(w *os.File) error {
 func (c *Canvas) PlainText() string {
 	rendered := c.Render()
 	stripped := StripANSI(rendered)
-	// Trim trailing whitespace from each line and remove trailing blank lines
+	// Normalize line endings and trim trailing whitespace from each line
+	stripped = strings.ReplaceAll(stripped, "\r\n", "\n")
+	stripped = strings.ReplaceAll(stripped, "\r", "\n")
 	lines := strings.Split(stripped, "\n")
 	var cleaned []string
 	for _, line := range lines {
-		cleaned = append(cleaned, strings.TrimRight(line, " "))
+		cleaned = append(cleaned, strings.TrimRight(line, " \t"))
 	}
 	// Remove trailing empty lines
 	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {

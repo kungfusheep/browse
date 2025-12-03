@@ -26,14 +26,60 @@ import (
 
 func main() {
 	url := ""
-	if len(os.Args) > 1 {
-		url = os.Args[1]
+	printMode := false
+
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "-p", "--print":
+			printMode = true
+		default:
+			if url == "" {
+				url = arg
+			}
+		}
+	}
+
+	if printMode {
+		if err := runPrint(url); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if err := run(url); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runPrint(url string) error {
+	var doc *html.Document
+	var err error
+
+	if url == "" {
+		doc, err = landingPage()
+	} else {
+		doc, err = fetchAndParseQuiet(url)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Use terminal width if available, otherwise default to 80
+	width := 80
+	if w, _, werr := render.TerminalSize(); werr == nil {
+		width = w
+	}
+
+	// Render to a tall canvas to capture full content
+	height := 10000
+	canvas := render.NewCanvas(width, height)
+	renderer := document.NewRenderer(canvas)
+	renderer.Render(doc, 0)
+
+	fmt.Print(canvas.PlainText())
+	return nil
 }
 
 func run(url string) error {
