@@ -138,14 +138,37 @@ func run(url string) error {
 	// Store raw HTML for rule generation
 	var currentHTML string
 
-	// History for back/forward navigation
-	type historyEntry struct {
+	// Page state for history
+	type pageState struct {
 		url     string
 		doc     *html.Document
 		scrollY int
+		html    string // raw HTML for rule generation
 	}
-	var history []historyEntry
-	var forwardHistory []historyEntry
+
+	// Buffers - vim-style tabs, each with its own history
+	type buffer struct {
+		history []pageState // back history stack
+		current pageState   // current page
+		forward []pageState // forward history stack (after going back)
+	}
+
+	// Initialize with single buffer containing the starting page
+	buffers := []buffer{{
+		current: pageState{url: url, doc: doc, scrollY: 0, html: currentHTML},
+	}}
+	currentBufferIdx := 0
+
+	// Helper to get current buffer
+	getCurrentBuffer := func() *buffer {
+		return &buffers[currentBufferIdx]
+	}
+
+	// Helper to navigate within current buffer (updates history)
+	var navigateTo func(newURL string, newDoc *html.Document, newHTML string)
+
+	// Helper to open a new buffer with a page
+	var openNewBuffer func(newURL string, newDoc *html.Document, newHTML string)
 
 	// State
 	contentHeight := renderer.ContentHeight(doc)
@@ -162,11 +185,14 @@ func run(url string) error {
 	navScrollOffset := 0     // scroll position within nav overlay
 	linkIndexMode := false   // showing link index overlay
 	linkScrollOffset := 0    // scroll position within link index
+	bufferMode := false      // showing buffer list overlay
+	bufferScrollOffset := 0  // scroll position within buffer list
 	urlMode := false         // entering a URL
 	searchMode := false      // entering a search query
 	loading := false         // currently loading a page
 	structureMode := false   // showing DOM structure inspector
 	jumpInput := ""
+	gPending := false // waiting for second key after 'g'
 	var labels []string
 	var navLinks []document.NavLink             // current navigation links in overlay
 	var activeInput *document.Input             // currently selected input
@@ -175,6 +201,49 @@ func run(url string) error {
 	var searchInput string                      // search query being entered
 	var structureViewer *inspector.Viewer       // DOM structure viewer
 	searchProvider := search.DefaultProvider()  // web search provider
+
+	// Define navigateTo helper - navigates within current buffer (updates history)
+	navigateTo = func(newURL string, newDoc *html.Document, newHTML string) {
+		buf := getCurrentBuffer()
+		// Save current state to history
+		buf.current.scrollY = scrollY
+		buf.history = append(buf.history, buf.current)
+		// Clear forward history (new navigation breaks forward chain)
+		buf.forward = nil
+		// Update current
+		buf.current = pageState{url: newURL, doc: newDoc, scrollY: 0, html: newHTML}
+		// Update local state
+		doc = newDoc
+		url = newURL
+		currentHTML = newHTML
+		contentHeight = renderer.ContentHeight(doc)
+		maxScroll = contentHeight - height
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		scrollY = 0
+	}
+
+	// Define openNewBuffer helper - opens a new buffer (like a new tab)
+	openNewBuffer = func(newURL string, newDoc *html.Document, newHTML string) {
+		// Save scroll position in current buffer
+		getCurrentBuffer().current.scrollY = scrollY
+		// Create new buffer with the page
+		buffers = append(buffers, buffer{
+			current: pageState{url: newURL, doc: newDoc, scrollY: 0, html: newHTML},
+		})
+		currentBufferIdx = len(buffers) - 1
+		// Update local state
+		doc = newDoc
+		url = newURL
+		currentHTML = newHTML
+		contentHeight = renderer.ContentHeight(doc)
+		maxScroll = contentHeight - height
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		scrollY = 0
+	}
 
 	// Handle terminal resize
 	resizeCh := make(chan os.Signal, 1)
@@ -311,6 +380,90 @@ func run(url string) error {
 			canvas.DimAll()
 			labels = document.GenerateLabels(len(renderer.Links()))
 			renderer.RenderLinkIndex(labels, linkScrollOffset)
+		}
+		if bufferMode {
+			canvas.DimAll()
+			labels = document.GenerateLabels(len(buffers))
+
+			// Draw buffer list as centered overlay box
+			boxWidth := 70
+			if boxWidth > width-4 {
+				boxWidth = width - 4
+			}
+			boxHeight := len(buffers) + 4
+			if boxHeight > height-4 {
+				boxHeight = height - 4
+			}
+
+			startX := (width - boxWidth) / 2
+			startY := (height - boxHeight) / 2
+
+			// Clear box area
+			for by := startY; by < startY+boxHeight; by++ {
+				for bx := startX; bx < startX+boxWidth; bx++ {
+					canvas.Set(bx, by, ' ', render.Style{})
+				}
+			}
+
+			// Draw border
+			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
+
+			// Title
+			title := fmt.Sprintf(" Buffers (%d) ", len(buffers))
+			titleX := startX + (boxWidth-len(title))/2
+			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+			// Draw buffers with labels
+			by := startY + 2
+			visibleCount := boxHeight - 4
+			for i := bufferScrollOffset; i < len(buffers) && i < bufferScrollOffset+visibleCount; i++ {
+				if i >= len(labels) {
+					break
+				}
+
+				buf := buffers[i]
+				bx := startX + 2
+
+				// Format: [label] [*] title - url
+				label := labels[i]
+				isCurrent := i == currentBufferIdx
+
+				// Extract title from URL or use URL
+				displayTitle := buf.current.url
+				if len(displayTitle) > 40 {
+					displayTitle = displayTitle[:37] + "..."
+				}
+
+				// Draw label (highlighted)
+				for j, ch := range label {
+					canvas.Set(bx+j, by, ch, render.Style{Reverse: true, Bold: true})
+				}
+
+				// Current buffer marker
+				marker := "  "
+				if isCurrent {
+					marker = " *"
+				}
+				canvas.WriteString(bx+len(label), by, marker, render.Style{Bold: isCurrent})
+
+				// URL
+				canvas.WriteString(bx+len(label)+2, by, displayTitle, render.Style{Bold: isCurrent})
+
+				by++
+			}
+
+			// Scroll indicators
+			if bufferScrollOffset > 0 {
+				canvas.WriteString(startX+boxWidth-4, startY+2, "↑", render.Style{Dim: true})
+			}
+			if bufferScrollOffset+visibleCount < len(buffers) {
+				canvas.WriteString(startX+boxWidth-4, startY+boxHeight-3, "↓", render.Style{Dim: true})
+			}
+
+			// Footer hint
+			hint := " label=switch  x=close  gt/gT=next/prev  ESC=cancel "
+			hintX := startX + (boxWidth-len(hint))/2
+			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
 		if textEntry && activeInput != nil {
 			// Draw text entry prompt at bottom of screen
@@ -453,23 +606,7 @@ func run(url string) error {
 						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
 						loading = false
 						if err == nil {
-							// Clear forward history on new navigation
-							forwardHistory = nil
-							// Push current page to history before navigating
-							history = append(history, historyEntry{
-								url:     url,
-								doc:     doc,
-								scrollY: scrollY,
-							})
-							doc = newDoc
-							url = newURL
-							currentHTML = htmlContent
-							contentHeight = renderer.ContentHeight(doc)
-							maxScroll = contentHeight - height
-							if maxScroll < 0 {
-								maxScroll = 0
-							}
-							scrollY = 0
+							navigateTo(newURL, newDoc, htmlContent)
 						}
 						redraw()
 						break
@@ -574,21 +711,7 @@ func run(url string) error {
 					// Navigate to the form result
 					newDoc, htmlContent, err := fetchWithRules(formURL, ruleCache)
 					if err == nil {
-						forwardHistory = nil
-						history = append(history, historyEntry{
-							url:     url,
-							doc:     doc,
-							scrollY: scrollY,
-						})
-						doc = newDoc
-						url = formURL
-						currentHTML = htmlContent
-						contentHeight = renderer.ContentHeight(doc)
-						maxScroll = contentHeight - height
-						if maxScroll < 0 {
-							maxScroll = 0
-						}
-						scrollY = 0
+						navigateTo(formURL, newDoc, htmlContent)
 					}
 				}
 				redraw()
@@ -714,21 +837,7 @@ func run(url string) error {
 						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
 						loading = false
 						if err == nil {
-							forwardHistory = nil
-							history = append(history, historyEntry{
-								url:     url,
-								doc:     doc,
-								scrollY: scrollY,
-							})
-							doc = newDoc
-							url = newURL
-							currentHTML = htmlContent
-							contentHeight = renderer.ContentHeight(doc)
-							maxScroll = contentHeight - height
-							if maxScroll < 0 {
-								maxScroll = 0
-							}
-							scrollY = 0
+							navigateTo(newURL, newDoc, htmlContent)
 						}
 						redraw()
 						break
@@ -807,21 +916,7 @@ func run(url string) error {
 						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
 						loading = false
 						if err == nil {
-							forwardHistory = nil
-							history = append(history, historyEntry{
-								url:     url,
-								doc:     doc,
-								scrollY: scrollY,
-							})
-							doc = newDoc
-							url = newURL
-							currentHTML = htmlContent
-							contentHeight = renderer.ContentHeight(doc)
-							maxScroll = contentHeight - height
-							if maxScroll < 0 {
-								maxScroll = 0
-							}
-							scrollY = 0
+							navigateTo(newURL, newDoc, htmlContent)
 						}
 						redraw()
 						break
@@ -841,6 +936,128 @@ func run(url string) error {
 						linkIndexMode = false
 						jumpInput = ""
 						linkScrollOffset = 0
+						redraw()
+					}
+				}
+			}
+			continue
+		}
+
+		// Buffer mode input handling
+		if bufferMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel buffer mode
+				bufferMode = false
+				jumpInput = ""
+				bufferScrollOffset = 0
+				redraw()
+
+			case buf[0] == 'j': // Scroll down
+				bufferScrollOffset++
+				if bufferScrollOffset > len(buffers)-1 {
+					bufferScrollOffset = len(buffers) - 1
+				}
+				if bufferScrollOffset < 0 {
+					bufferScrollOffset = 0
+				}
+				redraw()
+
+			case buf[0] == 'k': // Scroll up
+				bufferScrollOffset--
+				if bufferScrollOffset < 0 {
+					bufferScrollOffset = 0
+				}
+				redraw()
+
+			case buf[0] == 'x': // Close buffer under cursor
+				targetIdx := bufferScrollOffset
+				// Find which buffer the label would point to
+				for i, label := range labels {
+					if label == jumpInput && i < len(buffers) {
+						targetIdx = i
+						break
+					}
+				}
+				if len(buffers) > 1 && targetIdx < len(buffers) {
+					// Save current buffer's scroll position
+					buffers[currentBufferIdx].current.scrollY = scrollY
+
+					// Remove the buffer
+					buffers = append(buffers[:targetIdx], buffers[targetIdx+1:]...)
+
+					// Adjust current buffer index if needed
+					if currentBufferIdx >= len(buffers) {
+						currentBufferIdx = len(buffers) - 1
+					}
+					if targetIdx <= currentBufferIdx && currentBufferIdx > 0 {
+						currentBufferIdx--
+					}
+
+					// Switch to current buffer
+					buf := getCurrentBuffer()
+					doc = buf.current.doc
+					url = buf.current.url
+					scrollY = buf.current.scrollY
+					currentHTML = buf.current.html
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+
+					// Adjust scroll offset if needed
+					if bufferScrollOffset >= len(buffers) {
+						bufferScrollOffset = len(buffers) - 1
+					}
+					redraw()
+				}
+
+			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k' && buf[0] != 'x':
+				jumpInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				for i, label := range labels {
+					if label == jumpInput && i < len(buffers) {
+						// Found a match - switch to buffer!
+						matched = true
+						bufferMode = false
+						jumpInput = ""
+						bufferScrollOffset = 0
+
+						// Save current buffer's scroll position
+						buffers[currentBufferIdx].current.scrollY = scrollY
+
+						// Switch to selected buffer
+						currentBufferIdx = i
+						buf := getCurrentBuffer()
+						doc = buf.current.doc
+						url = buf.current.url
+						scrollY = buf.current.scrollY
+						currentHTML = buf.current.html
+						contentHeight = renderer.ContentHeight(doc)
+						maxScroll = contentHeight - height
+						if maxScroll < 0 {
+							maxScroll = 0
+						}
+						redraw()
+						break
+					}
+				}
+
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						bufferMode = false
+						jumpInput = ""
+						bufferScrollOffset = 0
 						redraw()
 					}
 				}
@@ -876,21 +1093,7 @@ func run(url string) error {
 					newDoc, htmlContent, err := fetchWithRules(targetURL, ruleCache)
 					loading = false
 					if err == nil {
-						forwardHistory = nil
-						history = append(history, historyEntry{
-							url:     url,
-							doc:     doc,
-							scrollY: scrollY,
-						})
-						doc = newDoc
-						url = targetURL
-						currentHTML = htmlContent
-						contentHeight = renderer.ContentHeight(doc)
-						maxScroll = contentHeight - height
-						if maxScroll < 0 {
-							maxScroll = 0
-						}
-						scrollY = 0
+						navigateTo(targetURL, newDoc, htmlContent)
 					}
 					redraw()
 				}
@@ -935,21 +1138,7 @@ func run(url string) error {
 						htmlContent := results.ToHTML()
 						newDoc, parseErr := html.ParseString(htmlContent)
 						if parseErr == nil {
-							forwardHistory = nil
-							history = append(history, historyEntry{
-								url:     url,
-								doc:     doc,
-								scrollY: scrollY,
-							})
-							doc = newDoc
-							url = "search://" + query
-							currentHTML = htmlContent
-							contentHeight = renderer.ContentHeight(doc)
-							maxScroll = contentHeight - height
-							if maxScroll < 0 {
-								maxScroll = 0
-							}
-							scrollY = 0
+							navigateTo("search://"+query, newDoc, htmlContent)
 						}
 					}
 					redraw()
@@ -980,13 +1169,9 @@ func run(url string) error {
 				// Get visible content from inspector and create new document
 				blocks := structureViewer.GetVisibleContent()
 				if newDoc := html.FromInspectorBlocks(blocks); newDoc != nil {
-					// Push current doc to history so user can go back
-					history = append(history, historyEntry{
-						url:     url,
-						doc:     doc,
-						scrollY: scrollY,
-					})
+					// Update current buffer with modified document
 					doc = newDoc
+					buffers[currentBufferIdx].current.doc = newDoc
 					contentHeight = renderer.ContentHeight(doc)
 					maxScroll = contentHeight - height
 					if maxScroll < 0 {
@@ -1055,8 +1240,30 @@ func run(url string) error {
 			jumpInput = ""
 			redraw()
 
-		case buf[0] == 't': // table of contents
-			if len(renderer.Headings()) > 0 {
+		case buf[0] == 't':
+			if gPending {
+				// gt - next buffer
+				gPending = false
+				if len(buffers) > 1 {
+					buffers[currentBufferIdx].current.scrollY = scrollY
+					currentBufferIdx++
+					if currentBufferIdx >= len(buffers) {
+						currentBufferIdx = 0 // wrap around
+					}
+					b := getCurrentBuffer()
+					doc = b.current.doc
+					url = b.current.url
+					scrollY = b.current.scrollY
+					currentHTML = b.current.html
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					redraw()
+				}
+			} else if len(renderer.Headings()) > 0 {
+				// t - table of contents
 				tocMode = true
 				jumpInput = ""
 				redraw()
@@ -1084,6 +1291,38 @@ func run(url string) error {
 				redraw()
 			}
 
+		case buf[0] == 'B': // forward in history (within current buffer)
+			buf := getCurrentBuffer()
+			if len(buf.forward) > 0 {
+				// Save current to history
+				buf.current.scrollY = scrollY
+				buf.history = append(buf.history, buf.current)
+				// Pop from forward
+				buf.current = buf.forward[len(buf.forward)-1]
+				buf.forward = buf.forward[:len(buf.forward)-1]
+				// Update local state
+				doc = buf.current.doc
+				url = buf.current.url
+				scrollY = buf.current.scrollY
+				currentHTML = buf.current.html
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				redraw()
+			}
+
+		case buf[0] == '`': // buffer list - show all open buffers
+			bufferMode = true
+			bufferScrollOffset = 0
+			jumpInput = ""
+			redraw()
+
+		case buf[0] == 'T' && !gPending: // T - open new buffer (duplicate current page)
+			openNewBuffer(url, doc, currentHTML)
+			redraw()
+
 		case buf[0] == 'w': // toggle wide mode (80 chars vs full width)
 			wideMode = !wideMode
 			renderer = document.NewRendererWide(canvas, wideMode)
@@ -1107,46 +1346,20 @@ func run(url string) error {
 				}
 			}
 
-		case buf[0] == 'b': // back
-			if len(history) > 0 {
-				// Push current page to forward history
-				forwardHistory = append(forwardHistory, historyEntry{
-					url:     url,
-					doc:     doc,
-					scrollY: scrollY,
-				})
-
+		case buf[0] == 'b': // back in history (within current buffer)
+			buf := getCurrentBuffer()
+			if len(buf.history) > 0 {
+				// Save current to forward
+				buf.current.scrollY = scrollY
+				buf.forward = append(buf.forward, buf.current)
 				// Pop from history
-				prev := history[len(history)-1]
-				history = history[:len(history)-1]
-
-				url = prev.url
-				doc = prev.doc
-				scrollY = prev.scrollY
-				contentHeight = renderer.ContentHeight(doc)
-				maxScroll = contentHeight - height
-				if maxScroll < 0 {
-					maxScroll = 0
-				}
-				redraw()
-			}
-
-		case buf[0] == 'B': // forward
-			if len(forwardHistory) > 0 {
-				// Push current page to history
-				history = append(history, historyEntry{
-					url:     url,
-					doc:     doc,
-					scrollY: scrollY,
-				})
-
-				// Pop from forward history
-				next := forwardHistory[len(forwardHistory)-1]
-				forwardHistory = forwardHistory[:len(forwardHistory)-1]
-
-				url = next.url
-				doc = next.doc
-				scrollY = next.scrollY
+				buf.current = buf.history[len(buf.history)-1]
+				buf.history = buf.history[:len(buf.history)-1]
+				// Update local state
+				doc = buf.current.doc
+				url = buf.current.url
+				scrollY = buf.current.scrollY
+				currentHTML = buf.current.html
 				contentHeight = renderer.ContentHeight(doc)
 				maxScroll = contentHeight - height
 				if maxScroll < 0 {
@@ -1158,20 +1371,7 @@ func run(url string) error {
 		case buf[0] == 'H': // home
 			homeDoc, err := landingPage()
 			if err == nil {
-				forwardHistory = nil
-				history = append(history, historyEntry{
-					url:     url,
-					doc:     doc,
-					scrollY: scrollY,
-				})
-				doc = homeDoc
-				url = "browse://home"
-				contentHeight = renderer.ContentHeight(doc)
-				maxScroll = contentHeight - height
-				if maxScroll < 0 {
-					maxScroll = 0
-				}
-				scrollY = 0
+				navigateTo("browse://home", homeDoc, "")
 				redraw()
 			}
 
@@ -1268,20 +1468,16 @@ func run(url string) error {
 						canvas.RenderTo(os.Stdout)
 						time.Sleep(500 * time.Millisecond)
 
-						// Push current to history so user can go back
-						forwardHistory = nil
-						history = append(history, historyEntry{
-							url:     url,
-							doc:     doc,
-							scrollY: scrollY,
-						})
+						// Update current buffer with the new parsed document
 						doc = newDoc
+						buffers[currentBufferIdx].current.doc = newDoc
 						contentHeight = renderer.ContentHeight(doc)
 						maxScroll = contentHeight - height
 						if maxScroll < 0 {
 							maxScroll = 0
 						}
 						scrollY = 0
+						buffers[currentBufferIdx].current.scrollY = 0
 					} else if err != nil {
 						// Show error
 						canvas.Clear()
@@ -1428,10 +1624,40 @@ func run(url string) error {
 			redraw()
 
 		case buf[0] == 'g':
-			scrollY = 0
-			redraw()
+			if gPending {
+				// gg - go to top
+				gPending = false
+				scrollY = 0
+				redraw()
+			} else {
+				// Start g-prefix mode
+				gPending = true
+			}
+
+		case buf[0] == 'T' && gPending:
+			// gT - previous buffer
+			gPending = false
+			if len(buffers) > 1 {
+				buffers[currentBufferIdx].current.scrollY = scrollY
+				currentBufferIdx--
+				if currentBufferIdx < 0 {
+					currentBufferIdx = len(buffers) - 1 // wrap around
+				}
+				b := getCurrentBuffer()
+				doc = b.current.doc
+				url = b.current.url
+				scrollY = b.current.scrollY
+				currentHTML = b.current.html
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				redraw()
+			}
 
 		case buf[0] == 'G':
+			gPending = false
 			scrollY = maxScroll
 			redraw()
 
@@ -1845,6 +2071,9 @@ func landingPage() (*html.Document, error) {
 <strong>n</strong> - site navigation |
 <strong>l</strong> - link index |
 <strong>b/B</strong> - back/forward |
+<strong>T</strong> - new buffer |
+<strong>gt/gT</strong> - next/prev buffer |
+<strong>&#96;</strong> - buffer list |
 <strong>H</strong> - home |
 <strong>s</strong> - structure inspector |
 <strong>w</strong> - wide mode |
