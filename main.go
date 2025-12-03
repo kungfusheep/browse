@@ -2,11 +2,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -14,7 +18,10 @@ import (
 	"browse/document"
 	"browse/fetcher"
 	"browse/html"
+	"browse/inspector"
+	"browse/llm"
 	"browse/render"
+	"browse/rules"
 )
 
 func main() {
@@ -69,15 +76,29 @@ func run(url string) error {
 
 	// Create canvas and renderer
 	canvas := render.NewCanvas(width, height)
-	renderer := document.NewRenderer(canvas)
+	wideMode := false // toggle with 'w' for full-width view
+	renderer := document.NewRendererWide(canvas, wideMode)
 
-	// History for back navigation
+	// Set up AI rule generation
+	llmClient := llm.NewClient(
+		llm.NewClaudeCode(),      // Prefer Claude Code CLI (free for CC users)
+		llm.NewClaudeAPI(""),     // Fall back to API if available
+	)
+	ruleCache, _ := rules.NewCache("") // Uses ~/.config/browse/rules/
+	ruleGeneratorV1 := rules.NewGenerator(llmClient)   // Legacy list-based rules
+	ruleGeneratorV2 := rules.NewGeneratorV2(llmClient) // New template-based rules
+
+	// Store raw HTML for rule generation
+	var currentHTML string
+
+	// History for back/forward navigation
 	type historyEntry struct {
 		url     string
 		doc     *html.Document
 		scrollY int
 	}
 	var history []historyEntry
+	var forwardHistory []historyEntry
 
 	// State
 	contentHeight := renderer.ContentHeight(doc)
@@ -87,19 +108,21 @@ func run(url string) error {
 	}
 	scrollY := 0
 	jumpMode := false
-	inputMode := false   // selecting an input field
-	textEntry := false   // entering text into a field
-	tocMode := false     // showing table of contents
-	navMode := false     // showing navigation overlay
-	navScrollOffset := 0 // scroll position within nav overlay
-	urlMode := false     // entering a URL
-	loading := false     // currently loading a page
+	inputMode := false      // selecting an input field
+	textEntry := false      // entering text into a field
+	tocMode := false        // showing table of contents
+	navMode := false        // showing navigation overlay
+	navScrollOffset := 0    // scroll position within nav overlay
+	urlMode := false        // entering a URL
+	loading := false        // currently loading a page
+	structureMode := false  // showing DOM structure inspector
 	jumpInput := ""
 	var labels []string
-	var navLinks []document.NavLink          // current navigation links in overlay
-	var activeInput *document.Input          // currently selected input
-	var enteredText string                   // text being entered
-	var urlInput string                      // URL being entered
+	var navLinks []document.NavLink             // current navigation links in overlay
+	var activeInput *document.Input             // currently selected input
+	var enteredText string                      // text being entered
+	var urlInput string                         // URL being entered
+	var structureViewer *inspector.Viewer       // DOM structure viewer
 
 	// Handle terminal resize
 	resizeCh := make(chan os.Signal, 1)
@@ -117,7 +140,7 @@ func run(url string) error {
 			width = newWidth
 			height = newHeight
 			canvas = render.NewCanvas(width, height)
-			renderer = document.NewRenderer(canvas)
+			renderer = document.NewRendererWide(canvas, wideMode)
 			contentHeight = renderer.ContentHeight(doc)
 			maxScroll = contentHeight - height
 			if maxScroll < 0 {
@@ -129,24 +152,78 @@ func run(url string) error {
 		}
 	}
 
+	// Extract domain from URL for status bar
+	getDomain := func(u string) string {
+		if u == "" || u == "browse://home" {
+			return "browse://home"
+		}
+		// Parse the URL to get the host
+		parsed, err := neturl.Parse(u)
+		if err != nil {
+			return u
+		}
+		return parsed.Host
+	}
+
 	// Render helper
 	redraw := func() {
+		// Structure inspector mode - separate rendering
+		if structureMode && structureViewer != nil {
+			structureViewer.Render()
+			canvas.RenderTo(os.Stdout)
+			return
+		}
+
 		renderer.Render(doc, scrollY)
 
-		// Draw scroll indicator on right edge
+		// Draw subtle status bar at bottom with current domain
+		domain := getDomain(url)
+		statusY := height - 1
+
+		// Build status line: domain on left, [W] indicator, scroll % on right
+		domainDisplay := domain
+		if len(domainDisplay) > width-15 {
+			domainDisplay = domainDisplay[:width-15] + "…"
+		}
+
+		var pctStr string
 		if contentHeight > height {
+			pct := 0
+			if maxScroll > 0 {
+				pct = scrollY * 100 / maxScroll
+			}
+			pctStr = fmt.Sprintf("%d%%", pct)
+		}
+
+		// Draw as dim text - subtle but visible
+		canvas.WriteString(0, statusY, domainDisplay, render.Style{Dim: true})
+
+		// Show wide mode indicator
+		if wideMode {
+			wideIndicator := "[W]"
+			wideX := len(domainDisplay) + 1
+			canvas.WriteString(wideX, statusY, wideIndicator, render.Style{Dim: true})
+		}
+
+		if pctStr != "" {
+			canvas.WriteString(width-len(pctStr), statusY, pctStr, render.Style{Dim: true})
+		}
+
+		// Draw scroll indicator on right edge (above status bar)
+		scrollHeight := height - 1 // Leave room for status bar
+		if contentHeight > height && scrollHeight > 0 {
 			// Calculate thumb position and size
-			thumbHeight := height * height / contentHeight
+			thumbHeight := scrollHeight * scrollHeight / contentHeight
 			if thumbHeight < 1 {
 				thumbHeight = 1
 			}
 			thumbPos := 0
 			if maxScroll > 0 {
-				thumbPos = scrollY * (height - thumbHeight) / maxScroll
+				thumbPos = scrollY * (scrollHeight - thumbHeight) / maxScroll
 			}
 
-			// Draw track and thumb
-			for y := 0; y < height; y++ {
+			// Draw track and thumb (only up to scrollHeight, not into status bar)
+			for y := 0; y < scrollHeight; y++ {
 				if y >= thumbPos && y < thumbPos+thumbHeight {
 					canvas.Set(width-1, y, '█', render.Style{Dim: true})
 				} else {
@@ -273,9 +350,11 @@ func run(url string) error {
 						canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
 						canvas.RenderTo(os.Stdout)
 
-						newDoc, err := fetchAndParseQuiet(newURL)
+						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
 						loading = false
 						if err == nil {
+							// Clear forward history on new navigation
+							forwardHistory = nil
 							// Push current page to history before navigating
 							history = append(history, historyEntry{
 								url:     url,
@@ -284,6 +363,7 @@ func run(url string) error {
 							})
 							doc = newDoc
 							url = newURL
+							currentHTML = htmlContent
 							contentHeight = renderer.ContentHeight(doc)
 							maxScroll = contentHeight - height
 							if maxScroll < 0 {
@@ -392,8 +472,9 @@ func run(url string) error {
 					canvas.RenderTo(os.Stdout)
 
 					// Navigate to the form result
-					newDoc, err := fetchAndParseQuiet(formURL)
+					newDoc, htmlContent, err := fetchWithRules(formURL, ruleCache)
 					if err == nil {
+						forwardHistory = nil
 						history = append(history, historyEntry{
 							url:     url,
 							doc:     doc,
@@ -401,6 +482,7 @@ func run(url string) error {
 						})
 						doc = newDoc
 						url = formURL
+						currentHTML = htmlContent
 						contentHeight = renderer.ContentHeight(doc)
 						maxScroll = contentHeight - height
 						if maxScroll < 0 {
@@ -529,9 +611,10 @@ func run(url string) error {
 						canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
 						canvas.RenderTo(os.Stdout)
 
-						newDoc, err := fetchAndParseQuiet(newURL)
+						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
 						loading = false
 						if err == nil {
+							forwardHistory = nil
 							history = append(history, historyEntry{
 								url:     url,
 								doc:     doc,
@@ -539,6 +622,7 @@ func run(url string) error {
 							})
 							doc = newDoc
 							url = newURL
+							currentHTML = htmlContent
 							contentHeight = renderer.ContentHeight(doc)
 							maxScroll = contentHeight - height
 							if maxScroll < 0 {
@@ -596,9 +680,10 @@ func run(url string) error {
 					canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
 					canvas.RenderTo(os.Stdout)
 
-					newDoc, err := fetchAndParseQuiet(targetURL)
+					newDoc, htmlContent, err := fetchWithRules(targetURL, ruleCache)
 					loading = false
 					if err == nil {
+						forwardHistory = nil
 						history = append(history, historyEntry{
 							url:     url,
 							doc:     doc,
@@ -606,6 +691,7 @@ func run(url string) error {
 						})
 						doc = newDoc
 						url = targetURL
+						currentHTML = htmlContent
 						contentHeight = renderer.ContentHeight(doc)
 						maxScroll = contentHeight - height
 						if maxScroll < 0 {
@@ -624,6 +710,83 @@ func run(url string) error {
 
 			case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
 				urlInput += string(buf[0])
+				redraw()
+			}
+			continue
+		}
+
+		// Structure inspector mode input handling
+		if structureMode && structureViewer != nil {
+			switch {
+			case buf[0] == 27: // Escape - exit structure mode
+				structureMode = false
+				structureViewer = nil
+				redraw()
+
+			case buf[0] == 13 || buf[0] == 10: // Enter - apply changes and exit
+				// Get visible content from inspector and create new document
+				blocks := structureViewer.GetVisibleContent()
+				if newDoc := html.FromInspectorBlocks(blocks); newDoc != nil {
+					// Push current doc to history so user can go back
+					history = append(history, historyEntry{
+						url:     url,
+						doc:     doc,
+						scrollY: scrollY,
+					})
+					doc = newDoc
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					scrollY = 0
+				}
+				structureMode = false
+				structureViewer = nil
+				redraw()
+
+			case buf[0] == ' ': // Space - toggle visibility
+				structureViewer.ToggleSelected()
+				redraw()
+
+			case buf[0] == 'j' || buf[0] == 14: // j or Ctrl+N - move down
+				structureViewer.MoveDown()
+				redraw()
+
+			case buf[0] == 'k' || buf[0] == 16: // k or Ctrl+P - move up
+				structureViewer.MoveUp()
+				redraw()
+
+			case buf[0] == 'h': // h - collapse
+				structureViewer.Collapse()
+				redraw()
+
+			case buf[0] == 'l': // l - expand
+				structureViewer.Expand()
+				redraw()
+
+			case n >= 3 && buf[0] == 27 && buf[1] == '[': // Arrow keys
+				switch buf[2] {
+				case 'A': // Up arrow
+					structureViewer.MoveUp()
+					redraw()
+				case 'B': // Down arrow
+					structureViewer.MoveDown()
+					redraw()
+				case 'C': // Right arrow - expand
+					structureViewer.Expand()
+					redraw()
+				case 'D': // Left arrow - collapse
+					structureViewer.Collapse()
+					redraw()
+				}
+
+			case buf[0] == 'T': // Shift+T - toggle recursively
+				structureViewer.ToggleSelectedRecursive()
+				redraw()
+
+			case buf[0] >= '1' && buf[0] <= '9': // Quick select suggestion
+				structureViewer.SelectSuggestion(int(buf[0] - '0'))
 				redraw()
 			}
 			continue
@@ -660,8 +823,38 @@ func run(url string) error {
 				redraw()
 			}
 
+		case buf[0] == 'w': // toggle wide mode (80 chars vs full width)
+			wideMode = !wideMode
+			renderer = document.NewRendererWide(canvas, wideMode)
+			contentHeight = renderer.ContentHeight(doc)
+			maxScroll = contentHeight - height
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if scrollY > maxScroll {
+				scrollY = maxScroll
+			}
+			redraw()
+
+		case buf[0] == 's': // structure inspector
+			if currentHTML != "" {
+				var err error
+				structureViewer, err = inspector.NewViewer(currentHTML, canvas)
+				if err == nil {
+					structureMode = true
+					redraw()
+				}
+			}
+
 		case buf[0] == 'b': // back
 			if len(history) > 0 {
+				// Push current page to forward history
+				forwardHistory = append(forwardHistory, historyEntry{
+					url:     url,
+					doc:     doc,
+					scrollY: scrollY,
+				})
+
 				// Pop from history
 				prev := history[len(history)-1]
 				history = history[:len(history)-1]
@@ -677,9 +870,34 @@ func run(url string) error {
 				redraw()
 			}
 
+		case buf[0] == 'B': // forward
+			if len(forwardHistory) > 0 {
+				// Push current page to history
+				history = append(history, historyEntry{
+					url:     url,
+					doc:     doc,
+					scrollY: scrollY,
+				})
+
+				// Pop from forward history
+				next := forwardHistory[len(forwardHistory)-1]
+				forwardHistory = forwardHistory[:len(forwardHistory)-1]
+
+				url = next.url
+				doc = next.doc
+				scrollY = next.scrollY
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				redraw()
+			}
+
 		case buf[0] == 'H': // home
 			homeDoc, err := landingPage()
 			if err == nil {
+				forwardHistory = nil
 				history = append(history, historyEntry{
 					url:     url,
 					doc:     doc,
@@ -716,9 +934,130 @@ func run(url string) error {
 				redraw()
 			}
 
+		case buf[0] == 'R': // Generate AI rules for current site
+			if url != "" && url != "browse://home" && llmClient.Available() {
+				domain := getDomain(url)
+
+				// Show generating status
+				canvas.Clear()
+				providerName := "AI"
+				if p := llmClient.Provider(); p != nil {
+					providerName = p.Name()
+				}
+				canvas.WriteString(width/2-18, height/2-1, "Generating template with "+providerName+"...", render.Style{Bold: true})
+				canvas.WriteString(width/2-12, height/2+1, "(v2 template system)", render.Style{Dim: true})
+				canvas.RenderTo(os.Stdout)
+
+				// Fetch fresh HTML if we don't have it
+				if currentHTML == "" {
+					_, htmlContent, err := fetchQuietWithHTML(url)
+					if err == nil {
+						currentHTML = htmlContent
+					}
+				}
+
+				if currentHTML != "" {
+					var newDoc *html.Document
+					var rule *rules.Rule
+					var useV2 bool
+
+					// Try v2 template system first
+					ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+					rule, err := ruleGeneratorV2.GeneratePageType(ctx, domain, url, currentHTML)
+					cancel()
+
+					if err == nil && rule != nil {
+						// Apply v2 rules
+						if result, applyErr := rules.ApplyV2(rule, url, currentHTML); applyErr == nil && result != nil && result.Content != "" {
+							newDoc = html.FromTemplateResult(result, domain)
+							useV2 = true
+						}
+					}
+
+					// Fall back to v1 if v2 didn't work
+					if newDoc == nil {
+						canvas.Clear()
+						canvas.WriteString(width/2-12, height/2, "Trying v1 fallback...", render.Style{Dim: true})
+						canvas.RenderTo(os.Stdout)
+
+						ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						rule, err = ruleGeneratorV1.Generate(ctx, domain, currentHTML)
+						cancel()
+
+						if err == nil && rule != nil {
+							if result := rules.Apply(rule, currentHTML); result != nil {
+								newDoc = html.FromRules(result)
+							}
+						}
+					}
+
+					if newDoc != nil {
+						// Save the rule
+						_ = ruleCache.Put(rule, true)
+
+						// Show success
+						canvas.Clear()
+						if useV2 {
+							canvas.WriteString(width/2-12, height/2, "✓ Template generated!", render.Style{Bold: true})
+						} else if rule != nil && rule.Verified {
+							canvas.WriteString(width/2-10, height/2, "✓ Rules validated!", render.Style{Bold: true})
+						} else {
+							canvas.WriteString(width/2-12, height/2, "Rules generated (unverified)", render.Style{Bold: true})
+						}
+						canvas.RenderTo(os.Stdout)
+						time.Sleep(500 * time.Millisecond)
+
+						// Push current to history so user can go back
+						forwardHistory = nil
+						history = append(history, historyEntry{
+							url:     url,
+							doc:     doc,
+							scrollY: scrollY,
+						})
+						doc = newDoc
+						contentHeight = renderer.ContentHeight(doc)
+						maxScroll = contentHeight - height
+						if maxScroll < 0 {
+							maxScroll = 0
+						}
+						scrollY = 0
+					} else if err != nil {
+						// Show error
+						canvas.Clear()
+						errMsg := err.Error()
+						if strings.Contains(errMsg, "default parser") {
+							canvas.WriteString(width/2-18, height/2, "Default parser works best for this site", render.Style{Dim: true})
+							canvas.RenderTo(os.Stdout)
+							time.Sleep(1 * time.Second)
+						} else {
+							if len(errMsg) > width-4 {
+								errMsg = errMsg[:width-7] + "..."
+							}
+							canvas.WriteString(2, height/2, "Error: "+errMsg, render.Style{Bold: true})
+							canvas.RenderTo(os.Stdout)
+							time.Sleep(2 * time.Second)
+						}
+					}
+				}
+				redraw()
+			}
+
 		case buf[0] == 'o': // open URL
 			urlMode = true
 			urlInput = ""
+			redraw()
+
+		case buf[0] == 'y': // yank (copy) URL to clipboard
+			if err := copyToClipboard(url); err == nil {
+				// Brief visual feedback - show "Copied!" in status area
+				canvas.Clear()
+				renderer.Render(doc, scrollY)
+				statusY := height - 1
+				msg := "URL copied to clipboard"
+				canvas.WriteString(0, statusY, msg, render.Style{Bold: true})
+				canvas.RenderTo(os.Stdout)
+				time.Sleep(800 * time.Millisecond)
+			}
 			redraw()
 
 		case buf[0] == 'j', buf[0] == 14:
@@ -868,6 +1207,139 @@ func fetchWithBrowserQuiet(url string) (*html.Document, error) {
 	return doc, nil
 }
 
+// fetchQuietWithHTML fetches and returns both parsed doc and raw HTML.
+func fetchQuietWithHTML(targetURL string) (*html.Document, string, error) {
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
+	}
+	defer resp.Body.Close()
+
+	// Read body into buffer so we can use it twice
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading body: %w", err)
+	}
+
+	doc, err := html.ParseString(string(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing HTML: %w", err)
+	}
+
+	return doc, string(body), nil
+}
+
+// fetchWithRules fetches and parses, applying cached rules if available.
+func fetchWithRules(targetURL string, cache *rules.Cache) (*html.Document, string, error) {
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading body: %w", err)
+	}
+
+	htmlContent := string(body)
+
+	// Always parse with default parser first
+	defaultDoc, err := html.ParseString(htmlContent)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing HTML: %w", err)
+	}
+
+	// Try to apply cached rules and compare quality
+	if cache != nil {
+		if rule := cache.GetForURL(targetURL); rule != nil {
+			if result := rules.Apply(rule, htmlContent); result != nil {
+				if rulesDoc := html.FromRules(result); rulesDoc != nil {
+					// Only use rules if they produce better quality output
+					if isRulesDocBetter(rulesDoc, defaultDoc, result) {
+						return rulesDoc, htmlContent, nil
+					}
+				}
+			}
+		}
+	}
+
+	return defaultDoc, htmlContent, nil
+}
+
+// isRulesDocBetter checks if the rules-based document is actually better than default.
+// Rules win if they have meaningful structured content, not garbage.
+func isRulesDocBetter(rulesDoc, defaultDoc *html.Document, result *rules.ApplyResult) bool {
+	if result == nil || len(result.Items) < 3 {
+		return false
+	}
+
+	// Check for quality indicators
+	goodTitles := 0
+	totalTitleLen := 0
+	hasLinks := 0
+
+	for _, item := range result.Items {
+		titleLen := len(item.Title)
+		totalTitleLen += titleLen
+
+		// Good title: reasonable length, not just numbers/punctuation
+		if titleLen >= 10 && titleLen <= 500 {
+			// Check it's not just section numbers like "1.1.1"
+			nonDigitCount := 0
+			for _, r := range item.Title {
+				if r < '0' || r > '9' {
+					if r != '.' && r != ' ' {
+						nonDigitCount++
+					}
+				}
+			}
+			if nonDigitCount > 5 {
+				goodTitles++
+			}
+		}
+
+		if item.Href != "" && item.Href != "#" {
+			hasLinks++
+		}
+	}
+
+	// Quality checks:
+	// 1. Average title length should be reasonable (not too short like "EN" or "1.1")
+	avgTitleLen := float64(totalTitleLen) / float64(len(result.Items))
+	if avgTitleLen < 15 {
+		return false
+	}
+
+	// 2. Most titles should be "good" (not section numbers)
+	goodRatio := float64(goodTitles) / float64(len(result.Items))
+	if goodRatio < 0.5 {
+		return false
+	}
+
+	// 3. For list-type content, should have decent link coverage
+	if result.LayoutType == "list" || result.LayoutType == "newspaper" {
+		linkRatio := float64(hasLinks) / float64(len(result.Items))
+		if linkRatio < 0.3 {
+			return false
+		}
+	}
+
+	return true
+}
+
 func showBrowserSpinner(done chan bool) {
 	frames := []string{"◐", "◓", "◑", "◒"} // Different spinner for browser mode
 	i := 0
@@ -938,6 +1410,25 @@ func resolveURL(base, href string) string {
 	return base[:lastSlash+1] + href
 }
 
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		// Try xclip first, then xsel
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		}
+	default:
+		return fmt.Errorf("clipboard not supported on %s", runtime.GOOS)
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
+}
+
 func landingPage() (*html.Document, error) {
 	page := `<!DOCTYPE html>
 <html>
@@ -953,19 +1444,37 @@ func landingPage() (*html.Document, error) {
 <strong>d/u</strong> - half page down/up |
 <strong>g/G</strong> - top/bottom |
 <strong>o</strong> - open URL |
+<strong>y</strong> - copy URL |
 <strong>f</strong> - follow link |
 <strong>t</strong> - table of contents |
 <strong>n</strong> - site navigation |
-<strong>b</strong> - back |
+<strong>b/B</strong> - back/forward |
 <strong>H</strong> - home |
+<strong>s</strong> - structure inspector |
+<strong>w</strong> - wide mode |
 <strong>i</strong> - input field |
 <strong>r</strong> - reload with JS |
+<strong>R</strong> - generate AI rules |
 <strong>q</strong> - quit
 </p>
 
 <h2>News</h2>
 <ul>
-<li><a href="https://text.npr.org">NPR Text</a> - National Public Radio (text version)</li>
+<li><a href="https://www.bbc.com/news">BBC News</a> - British Broadcasting Corporation</li>
+<li><a href="https://www.nytimes.com">New York Times</a> - All the news that's fit to print</li>
+<li><a href="https://www.theguardian.com">The Guardian</a> - Independent journalism</li>
+<li><a href="https://www.reuters.com">Reuters</a> - International news agency</li>
+<li><a href="https://www.washingtonpost.com">Washington Post</a> - Democracy dies in darkness</li>
+<li><a href="https://www.wsj.com">Wall Street Journal</a> - Business and financial news</li>
+<li><a href="https://www.cnn.com">CNN</a> - Cable News Network</li>
+<li><a href="https://apnews.com">Associated Press</a> - AP News</li>
+<li><a href="https://www.npr.org">NPR</a> - National Public Radio</li>
+<li><a href="https://news.ycombinator.com">Hacker News</a> - Y Combinator tech news</li>
+</ul>
+
+<h3>Lightweight versions</h3>
+<ul>
+<li><a href="https://text.npr.org">NPR Text</a> - NPR (text-only version)</li>
 <li><a href="https://lite.cnn.com">CNN Lite</a> - CNN (lightweight version)</li>
 <li><a href="https://lobste.rs">Lobsters</a> - Computing-focused link aggregator</li>
 </ul>

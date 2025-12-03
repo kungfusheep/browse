@@ -1,7 +1,10 @@
 package html
 
 import (
+	"strings"
 	"testing"
+
+	"browse/rules"
 )
 
 func TestParse(t *testing.T) {
@@ -79,6 +82,121 @@ func TestPlainText(t *testing.T) {
 		t.Errorf("PlainText() = %q, expected 'Hello world!'", text)
 	}
 }
+
+func TestFromTemplateArrowList(t *testing.T) {
+	// Test that arrow list items are properly parsed
+	result := &rules.ApplyV2Result{
+		Content: `BBC NEWS
+══════════════════════════════════════════════════
+
+  → First item ~~2 hrs ago~~
+  → Second item ~~3 hrs ago~~
+  → Third item ~~13 hrs ago~~`,
+	}
+
+	doc := FromTemplateResult(result, "bbc.com")
+	if doc == nil {
+		t.Fatal("FromTemplateResult returned nil")
+	}
+
+	// Should have: paragraph (BBC NEWS), hr, list
+	children := doc.Content.Children
+	if len(children) < 2 {
+		t.Fatalf("expected at least 2 children, got %d", len(children))
+	}
+
+	// Find the list
+	var list *Node
+	for _, child := range children {
+		if child.Type == NodeList {
+			list = child
+			break
+		}
+	}
+
+	if list == nil {
+		t.Fatal("expected a NodeList for arrow items")
+	}
+
+	if len(list.Children) != 3 {
+		t.Errorf("expected 3 list items, got %d", len(list.Children))
+	}
+}
+
+func TestFromTemplateWithLinks(t *testing.T) {
+	// Test that links from ApplyV2Result are matched to list items
+	result := &rules.ApplyV2Result{
+		Content: `NEWS
+══════════════════════════════════════════════════
+
+  → Breaking story about politics
+  → Tech company announces new product`,
+		Links: []rules.ExtractedLink{
+			{Text: "Breaking story about politics", Href: "/news/politics/123"},
+			{Text: "Tech company announces new product", Href: "/news/tech/456"},
+		},
+	}
+
+	doc := FromTemplateResult(result, "example.com")
+	if doc == nil {
+		t.Fatal("FromTemplateResult returned nil")
+	}
+
+	// Find the list
+	var list *Node
+	for _, child := range doc.Content.Children {
+		if child.Type == NodeList {
+			list = child
+			break
+		}
+	}
+
+	if list == nil {
+		t.Fatal("expected a NodeList")
+	}
+
+	if len(list.Children) != 2 {
+		t.Fatalf("expected 2 list items, got %d", len(list.Children))
+	}
+
+	// Check that list items have NodeLink children with hrefs
+	// The renderer looks for NodeLink children, not Href on the list item itself
+	findLinkHref := func(item *Node) string {
+		for _, child := range item.Children {
+			if child.Type == NodeLink {
+				return child.Href
+			}
+		}
+		return ""
+	}
+
+	// Also check the structure is what the renderer expects
+	findLinkText := func(item *Node) string {
+		for _, child := range item.Children {
+			if child.Type == NodeLink {
+				return child.PlainText()
+			}
+		}
+		return ""
+	}
+
+	// First item
+	if href := findLinkHref(list.Children[0]); href != "/news/politics/123" {
+		t.Errorf("expected href '/news/politics/123', got %q", href)
+	}
+	if text := findLinkText(list.Children[0]); !strings.Contains(text, "Breaking story") {
+		t.Errorf("expected link text containing 'Breaking story', got %q", text)
+	}
+
+	// Second item
+	if href := findLinkHref(list.Children[1]); href != "/news/tech/456" {
+		t.Errorf("expected href '/news/tech/456', got %q", href)
+	}
+	if text := findLinkText(list.Children[1]); !strings.Contains(text, "Tech company") {
+		t.Errorf("expected link text containing 'Tech company', got %q", text)
+	}
+}
+
 
 func TestNavigationExtraction(t *testing.T) {
 	input := `<!DOCTYPE html>

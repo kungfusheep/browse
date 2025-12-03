@@ -57,13 +57,18 @@ type Renderer struct {
 	h3Count int
 }
 
-// NewRenderer creates a renderer for the given canvas.
+// NewRenderer creates a renderer for the given canvas with default 80-char margins.
 func NewRenderer(c *render.Canvas) *Renderer {
+	return NewRendererWide(c, false)
+}
+
+// NewRendererWide creates a renderer with optional wide mode (no content width cap).
+func NewRendererWide(c *render.Canvas, wideMode bool) *Renderer {
 	canvasWidth := c.Width()
 
-	// Content width is capped at maxContentWidth
+	// Content width is capped at maxContentWidth unless in wide mode
 	contentWidth := canvasWidth - 4 // minimal margins
-	if contentWidth > maxContentWidth {
+	if !wideMode && contentWidth > maxContentWidth {
 		contentWidth = maxContentWidth
 	}
 
@@ -156,6 +161,9 @@ func (r *Renderer) nodeHeight(n *html.Node, textWidth int) int {
 	case html.NodeCodeBlock:
 		lines := strings.Split(n.Text, "\n")
 		return len(lines) + 2
+	case html.NodeTable:
+		// Table height = header separator + rows + top/bottom borders + spacing
+		return len(n.Children) + 3
 	default:
 		return 1
 	}
@@ -181,6 +189,8 @@ func (r *Renderer) renderNode(n *html.Node) {
 		r.renderForm(n)
 	case html.NodeInput:
 		r.renderInput(n)
+	case html.NodeTable:
+		r.renderTable(n)
 	}
 }
 
@@ -645,6 +655,244 @@ func (r *Renderer) renderCodeBlock(text string) {
 
 	r.canvas.DrawHLine(r.leftMargin, r.y, r.contentWidth, render.SingleBox.Horizontal, render.Style{Dim: true})
 	r.y++
+}
+
+func (r *Renderer) renderTable(n *html.Node) {
+	if len(n.Children) == 0 {
+		return
+	}
+
+	// Calculate column widths based on content
+	colWidths := r.calculateColumnWidths(n)
+	if len(colWidths) == 0 {
+		return
+	}
+
+	// Calculate total table width
+	tableWidth := 1 // left border
+	for _, w := range colWidths {
+		tableWidth += w + 3 // content + padding + separator
+	}
+
+	// Ensure table fits in content width
+	if tableWidth > r.contentWidth {
+		r.shrinkColumnsToFit(colWidths, r.contentWidth)
+		tableWidth = 1
+		for _, w := range colWidths {
+			tableWidth += w + 3
+		}
+	}
+
+	// Center the table if it's narrower than content width
+	tableX := r.leftMargin
+	if tableWidth < r.contentWidth {
+		tableX = r.leftMargin + (r.contentWidth-tableWidth)/2
+	}
+
+	// Find first header row (if any)
+	headerRowIdx := -1
+	for i, row := range n.Children {
+		if row.Type == html.NodeTableRow && len(row.Children) > 0 {
+			if row.Children[0].IsHeader {
+				headerRowIdx = i
+				break
+			}
+		}
+	}
+
+	// Draw top border
+	r.drawTableBorder(tableX, colWidths, '┌', '┬', '┐')
+	r.y++
+
+	// Draw rows
+	for i, row := range n.Children {
+		if row.Type != html.NodeTableRow {
+			continue
+		}
+
+		r.drawTableRow(tableX, row, colWidths)
+		r.y++
+
+		// Draw separator after header row
+		if i == headerRowIdx {
+			r.drawTableBorder(tableX, colWidths, '├', '┼', '┤')
+			r.y++
+		}
+	}
+
+	// Draw bottom border
+	r.drawTableBorder(tableX, colWidths, '└', '┴', '┘')
+	r.y++
+	r.y++ // Extra spacing after table
+}
+
+func (r *Renderer) calculateColumnWidths(table *html.Node) []int {
+	var maxCols int
+	for _, row := range table.Children {
+		if row.Type == html.NodeTableRow && len(row.Children) > maxCols {
+			maxCols = len(row.Children)
+		}
+	}
+
+	if maxCols == 0 {
+		return nil
+	}
+
+	widths := make([]int, maxCols)
+
+	// Find max width for each column
+	for _, row := range table.Children {
+		if row.Type != html.NodeTableRow {
+			continue
+		}
+		for i, cell := range row.Children {
+			if i >= maxCols {
+				break
+			}
+			text := cell.PlainText()
+			if len(text) > widths[i] {
+				widths[i] = len(text)
+			}
+		}
+	}
+
+	// Set minimum widths and cap maximum
+	for i := range widths {
+		if widths[i] < 3 {
+			widths[i] = 3
+		}
+		if widths[i] > 40 {
+			widths[i] = 40
+		}
+	}
+
+	return widths
+}
+
+func (r *Renderer) shrinkColumnsToFit(widths []int, maxWidth int) {
+	for {
+		total := 1
+		for _, w := range widths {
+			total += w + 3
+		}
+		if total <= maxWidth {
+			break
+		}
+
+		// Find widest column and shrink it
+		maxIdx := 0
+		for i, w := range widths {
+			if w > widths[maxIdx] {
+				maxIdx = i
+			}
+		}
+		if widths[maxIdx] <= 3 {
+			break // Can't shrink further
+		}
+		widths[maxIdx]--
+	}
+}
+
+func (r *Renderer) drawTableBorder(x int, colWidths []int, left, mid, right rune) {
+	style := render.Style{Dim: true}
+	pos := x
+
+	r.canvas.Set(pos, r.y, left, style)
+	pos++
+
+	for i, w := range colWidths {
+		for j := 0; j < w+2; j++ { // width + padding
+			r.canvas.Set(pos, r.y, '─', style)
+			pos++
+		}
+		if i < len(colWidths)-1 {
+			r.canvas.Set(pos, r.y, mid, style)
+		} else {
+			r.canvas.Set(pos, r.y, right, style)
+		}
+		pos++
+	}
+}
+
+func (r *Renderer) drawTableRow(x int, row *html.Node, colWidths []int) {
+	style := render.Style{Dim: true}
+	pos := x
+
+	// Left border
+	r.canvas.Set(pos, r.y, '│', style)
+	pos++
+
+	for i, width := range colWidths {
+		// Get cell content
+		var cellText string
+		var isHeader bool
+		var cellHref string
+		if i < len(row.Children) {
+			cell := row.Children[i]
+			cellText = cell.PlainText()
+			isHeader = cell.IsHeader
+			// Check if cell contains a link
+			for _, child := range cell.Children {
+				if child.Type == html.NodeLink {
+					cellHref = child.Href
+					break
+				}
+			}
+		}
+
+		// Truncate if needed
+		if len(cellText) > width {
+			cellText = cellText[:width-1] + "…"
+		}
+
+		// Pad to width
+		padding := width - len(cellText)
+		leftPad := padding / 2
+		rightPad := padding - leftPad
+
+		// Write padding + content
+		r.canvas.Set(pos, r.y, ' ', style)
+		pos++
+
+		for j := 0; j < leftPad; j++ {
+			r.canvas.Set(pos, r.y, ' ', style)
+			pos++
+		}
+
+		// Choose style based on header/link status
+		contentStyle := render.Style{}
+		if isHeader {
+			contentStyle.Bold = true
+		}
+		if cellHref != "" {
+			contentStyle.Underline = true
+			// Track link position
+			r.links = append(r.links, Link{
+				Href:   cellHref,
+				X:      pos,
+				Y:      r.y + r.scrollY,
+				Length: len(cellText),
+			})
+		}
+
+		// Write cell content
+		for _, ch := range cellText {
+			r.canvas.Set(pos, r.y, ch, contentStyle)
+			pos++
+		}
+
+		for j := 0; j < rightPad; j++ {
+			r.canvas.Set(pos, r.y, ' ', style)
+			pos++
+		}
+
+		r.canvas.Set(pos, r.y, ' ', style)
+		pos++
+
+		// Column separator
+		r.canvas.Set(pos, r.y, '│', style)
+		pos++
+	}
 }
 
 func (r *Renderer) renderForm(n *html.Node) {

@@ -29,6 +29,7 @@ type Style struct {
 	Dim       bool
 	Underline bool
 	Reverse   bool
+	FgColor   int // ANSI foreground color code (0 = default, 32 = green, 33 = yellow, etc.)
 }
 
 // BoxStyle defines the characters used for drawing boxes.

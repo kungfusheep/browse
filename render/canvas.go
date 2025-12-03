@@ -172,6 +172,9 @@ func styleSequence(s Style) string {
 	if s.Reverse {
 		codes = append(codes, "7")
 	}
+	if s.FgColor > 0 {
+		codes = append(codes, fmt.Sprintf("%d", s.FgColor))
+	}
 	return fmt.Sprintf("\033[%sm", strings.Join(codes, ";"))
 }
 

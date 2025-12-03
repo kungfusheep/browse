@@ -416,6 +416,18 @@ func IsBlockedResponse(html string) (bool, string) {
 	if contains(html, "Before you continue") && contains(html, "consent.google") {
 		return true, "Google consent page"
 	}
+	// DataDome bot protection (used by Reuters, WSJ, etc.)
+	if contains(html, "captcha-delivery.com") || contains(html, "DataDome") {
+		return true, "DataDome bot protection"
+	}
+	// Akamai Bot Manager
+	if contains(html, "akam/") && len(html) < 5000 {
+		return true, "Akamai bot protection"
+	}
+	// PerimeterX
+	if contains(html, "perimeterx") || contains(html, "px-captcha") {
+		return true, "PerimeterX bot protection"
+	}
 	return false, ""
 }
 
