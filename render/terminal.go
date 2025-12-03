@@ -15,7 +15,7 @@ type Terminal struct {
 // NewTerminal creates a terminal controller for the given file.
 func NewTerminal(f *os.File) (*Terminal, error) {
 	fd := int(f.Fd())
-	termios, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	termios, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
 	if err != nil {
 		return nil, err
 	}
@@ -31,12 +31,12 @@ func (t *Terminal) EnterRawMode() error {
 	raw.Lflag &^= unix.ECHO | unix.ICANON | unix.IEXTEN | unix.ISIG
 	raw.Cc[unix.VMIN] = 0
 	raw.Cc[unix.VTIME] = 1
-	return unix.IoctlSetTermios(t.fd, unix.TIOCSETA, &raw)
+	return unix.IoctlSetTermios(t.fd, ioctlSetTermios, &raw)
 }
 
 // RestoreMode restores the original terminal mode.
 func (t *Terminal) RestoreMode() error {
-	return unix.IoctlSetTermios(t.fd, unix.TIOCSETA, &t.original)
+	return unix.IoctlSetTermios(t.fd, ioctlSetTermios, &t.original)
 }
 
 const (
