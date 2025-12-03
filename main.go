@@ -154,14 +154,16 @@ func run(url string) error {
 	}
 	scrollY := 0
 	jumpMode := false
-	inputMode := false      // selecting an input field
-	textEntry := false      // entering text into a field
-	tocMode := false        // showing table of contents
-	navMode := false        // showing navigation overlay
-	navScrollOffset := 0    // scroll position within nav overlay
-	urlMode := false        // entering a URL
-	loading := false        // currently loading a page
-	structureMode := false  // showing DOM structure inspector
+	inputMode := false       // selecting an input field
+	textEntry := false       // entering text into a field
+	tocMode := false         // showing table of contents
+	navMode := false         // showing navigation overlay
+	navScrollOffset := 0     // scroll position within nav overlay
+	linkIndexMode := false   // showing link index overlay
+	linkScrollOffset := 0    // scroll position within link index
+	urlMode := false         // entering a URL
+	loading := false         // currently loading a page
+	structureMode := false   // showing DOM structure inspector
 	jumpInput := ""
 	var labels []string
 	var navLinks []document.NavLink             // current navigation links in overlay
@@ -298,6 +300,10 @@ func run(url string) error {
 			}
 			labels = document.GenerateLabels(totalLinks)
 			navLinks = renderer.RenderNavigation(doc.Navigation, labels, navScrollOffset)
+		}
+		if linkIndexMode {
+			labels = document.GenerateLabels(len(renderer.Links()))
+			renderer.RenderLinkIndex(labels, linkScrollOffset)
 		}
 		if textEntry && activeInput != nil {
 			// Draw text entry prompt at bottom of screen
@@ -701,6 +707,99 @@ func run(url string) error {
 			continue
 		}
 
+		// Link index mode input handling
+		if linkIndexMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel link index mode
+				linkIndexMode = false
+				jumpInput = ""
+				linkScrollOffset = 0
+				redraw()
+
+			case buf[0] == 'j': // Scroll down
+				linkScrollOffset++
+				links := renderer.Links()
+				if linkScrollOffset > len(links)-1 {
+					linkScrollOffset = len(links) - 1
+				}
+				if linkScrollOffset < 0 {
+					linkScrollOffset = 0
+				}
+				redraw()
+
+			case buf[0] == 'k': // Scroll up
+				linkScrollOffset--
+				if linkScrollOffset < 0 {
+					linkScrollOffset = 0
+				}
+				redraw()
+
+			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k':
+				jumpInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				links := renderer.Links()
+				for i, label := range labels {
+					if label == jumpInput && i < len(links) {
+						// Found a match - navigate to the link!
+						matched = true
+						linkIndexMode = false
+						jumpInput = ""
+						linkScrollOffset = 0
+
+						newURL := resolveURL(url, links[i].Href)
+						loading = true
+
+						// Show loading status
+						canvas.Clear()
+						canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
+						canvas.RenderTo(os.Stdout)
+
+						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
+						loading = false
+						if err == nil {
+							forwardHistory = nil
+							history = append(history, historyEntry{
+								url:     url,
+								doc:     doc,
+								scrollY: scrollY,
+							})
+							doc = newDoc
+							url = newURL
+							currentHTML = htmlContent
+							contentHeight = renderer.ContentHeight(doc)
+							maxScroll = contentHeight - height
+							if maxScroll < 0 {
+								maxScroll = 0
+							}
+							scrollY = 0
+						}
+						redraw()
+						break
+					}
+				}
+
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						linkIndexMode = false
+						jumpInput = ""
+						linkScrollOffset = 0
+						redraw()
+					}
+				}
+			}
+			continue
+		}
+
 		// URL input mode handling
 		if urlMode {
 			switch {
@@ -865,6 +964,14 @@ func run(url string) error {
 		case buf[0] == 'n': // navigation - show nav links overlay
 			if len(doc.Navigation) > 0 {
 				navMode = true
+				jumpInput = ""
+				redraw()
+			}
+
+		case buf[0] == 'l': // link index - show all page links
+			if len(renderer.Links()) > 0 {
+				linkIndexMode = true
+				linkScrollOffset = 0
 				jumpInput = ""
 				redraw()
 			}
@@ -1622,6 +1729,7 @@ func landingPage() (*html.Document, error) {
 <strong>f</strong> - follow link |
 <strong>t</strong> - table of contents |
 <strong>n</strong> - site navigation |
+<strong>l</strong> - link index |
 <strong>b/B</strong> - back/forward |
 <strong>H</strong> - home |
 <strong>s</strong> - structure inspector |

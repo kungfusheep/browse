@@ -14,8 +14,9 @@ const maxContentWidth = 80
 // Link represents a clickable link in the document.
 type Link struct {
 	Href   string
-	X, Y   int // position on canvas
-	Length int // display length for highlighting
+	Text   string // link text for display
+	X, Y   int    // position on canvas
+	Length int    // display length for highlighting
 }
 
 // Input represents an interactive input field in the document.
@@ -248,6 +249,7 @@ func (r *Renderer) renderHeading1(n *html.Node) {
 	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 		r.links = append(r.links, Link{
 			Href:   href,
+			Text:   displayText,
 			X:      r.leftMargin,
 			Y:      r.y,
 			Length: render.StringWidth(displayText),
@@ -291,6 +293,7 @@ func (r *Renderer) renderHeading2(n *html.Node) {
 	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 		r.links = append(r.links, Link{
 			Href:   href,
+			Text:   text,
 			X:      r.leftMargin,
 			Y:      r.y,
 			Length: render.StringWidth(text),
@@ -339,6 +342,7 @@ func (r *Renderer) renderHeading3(n *html.Node) {
 		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 			r.links = append(r.links, Link{
 				Href:   href,
+				Text:   text,
 				X:      r.leftMargin,
 				Y:      r.y,
 				Length: render.StringWidth(text),
@@ -351,6 +355,7 @@ func (r *Renderer) renderHeading3(n *html.Node) {
 		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
 			r.links = append(r.links, Link{
 				Href:   href,
+				Text:   text,
 				X:      r.leftMargin,
 				Y:      r.y,
 				Length: render.StringWidth(text),
@@ -388,6 +393,7 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 				if span.Href != "" {
 					r.links = append(r.links, Link{
 						Href:   span.Href,
+						Text:   span.Text,
 						X:      x,
 						Y:      r.y,
 						Length: render.StringWidth(span.Text),
@@ -573,6 +579,7 @@ func (r *Renderer) renderList(n *html.Node) {
 				if span.Href != "" {
 					r.links = append(r.links, Link{
 						Href:   span.Href,
+						Text:   span.Text,
 						X:      x,
 						Y:      r.y,
 						Length: render.StringWidth(span.Text),
@@ -915,6 +922,7 @@ func (r *Renderer) drawTableRow(x int, row *html.Node, colWidths []int) {
 			// Track link position
 			r.links = append(r.links, Link{
 				Href:   cellHref,
+				Text:   cellText,
 				X:      pos,
 				Y:      r.y + r.scrollY,
 				Length: len(cellText),
@@ -1165,6 +1173,105 @@ func (r *Renderer) RenderTOC(labels []string) {
 	hint := " Press label to jump, ESC to close "
 	hintX := startX + (tocWidth-len(hint))/2
 	r.canvas.WriteString(hintX, startY+tocHeight-1, hint, render.Style{Dim: true})
+}
+
+// RenderLinkIndex draws a link index overlay showing all page links.
+func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int) {
+	if len(r.links) == 0 {
+		return
+	}
+
+	height := r.canvas.Height()
+	width := r.canvas.Width()
+
+	// Calculate box dimensions
+	boxWidth := 70
+	if boxWidth > width-4 {
+		boxWidth = width - 4
+	}
+	maxVisible := height - 8
+	boxHeight := len(r.links) + 4
+	if boxHeight > height-4 {
+		boxHeight = height - 4
+	}
+
+	// Center the box
+	startX := (width - boxWidth) / 2
+	startY := (height - boxHeight) / 2
+
+	// Draw box background (clear area)
+	for y := startY; y < startY+boxHeight; y++ {
+		for x := startX; x < startX+boxWidth; x++ {
+			r.canvas.Set(x, y, ' ', render.Style{})
+		}
+	}
+
+	// Draw border
+	r.canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
+
+	// Title
+	title := fmt.Sprintf(" Page Links (%d) ", len(r.links))
+	titleX := startX + (boxWidth-len(title))/2
+	r.canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+	// Draw links with labels
+	y := startY + 2
+	visibleCount := boxHeight - 4
+	for i := scrollOffset; i < len(r.links) && i < scrollOffset+visibleCount; i++ {
+		if i >= len(labels) {
+			break
+		}
+
+		link := r.links[i]
+		x := startX + 2
+
+		// Format: [label] text → href
+		label := labels[i]
+		text := link.Text
+		if text == "" {
+			text = "(no text)"
+		}
+
+		// Truncate text and href to fit
+		maxTextWidth := (boxWidth - 10 - len(label)) / 2
+		if len(text) > maxTextWidth {
+			text = text[:maxTextWidth-3] + "..."
+		}
+
+		href := link.Href
+		maxHrefWidth := boxWidth - 8 - len(label) - render.StringWidth(text)
+		if len(href) > maxHrefWidth {
+			href = href[:maxHrefWidth-3] + "..."
+		}
+
+		// Draw label (highlighted)
+		for j, ch := range label {
+			r.canvas.Set(x+j, y, ch, render.Style{Reverse: true, Bold: true})
+		}
+
+		// Draw text and href
+		line := fmt.Sprintf(" %s ", text)
+		r.canvas.WriteString(x+len(label), y, line, render.Style{})
+		r.canvas.WriteString(x+len(label)+render.StringWidth(line), y, href, render.Style{Dim: true})
+
+		y++
+	}
+
+	// Scroll indicators
+	if scrollOffset > 0 {
+		r.canvas.WriteString(startX+boxWidth-4, startY+2, "↑", render.Style{Dim: true})
+	}
+	if scrollOffset+visibleCount < len(r.links) {
+		r.canvas.WriteString(startX+boxWidth-4, startY+boxHeight-3, "↓", render.Style{Dim: true})
+	}
+
+	// Footer hint
+	hint := " Press label to go, j/k scroll, ESC close "
+	if maxVisible >= len(r.links) {
+		hint = " Press label to go, ESC to close "
+	}
+	hintX := startX + (boxWidth-len(hint))/2
+	r.canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 }
 
 // NavLink represents a navigation link for the overlay.
