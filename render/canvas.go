@@ -57,6 +57,16 @@ func (c *Canvas) Clear() {
 	}
 }
 
+// DimAll applies the Dim style to all cells, greying out the canvas content.
+func (c *Canvas) DimAll() {
+	for y := range c.cells {
+		for x := range c.cells[y] {
+			c.cells[y][x].Style.Dim = true
+			c.cells[y][x].Style.Bold = false
+		}
+	}
+}
+
 // Set places a rune at the given position with the given style.
 func (c *Canvas) Set(x, y int, r rune, style Style) {
 	if x < 0 || x >= c.width || y < 0 || y >= c.height {

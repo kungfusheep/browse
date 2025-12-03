@@ -289,10 +289,12 @@ func run(url string) error {
 			renderer.RenderInputLabels(labels)
 		}
 		if tocMode {
+			canvas.DimAll()
 			labels = document.GenerateLabels(len(renderer.Headings()))
 			renderer.RenderTOC(labels)
 		}
 		if navMode && len(doc.Navigation) > 0 {
+			canvas.DimAll()
 			// Count total links across all nav sections
 			totalLinks := 0
 			for _, nav := range doc.Navigation {
@@ -302,6 +304,7 @@ func run(url string) error {
 			navLinks = renderer.RenderNavigation(doc.Navigation, labels, navScrollOffset)
 		}
 		if linkIndexMode {
+			canvas.DimAll()
 			labels = document.GenerateLabels(len(renderer.Links()))
 			renderer.RenderLinkIndex(labels, linkScrollOffset)
 		}
@@ -314,6 +317,7 @@ func run(url string) error {
 			canvas.WriteString(0, height-1, prompt, render.Style{Reverse: true, Bold: true})
 		}
 		if urlMode {
+			canvas.DimAll()
 			// Draw URL input as centered overlay box (like TOC)
 			boxWidth := 50
 			if boxWidth > width-4 {
