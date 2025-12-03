@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"browse/document"
+	"browse/favourites"
 	"browse/fetcher"
 	"browse/html"
 	"browse/inspector"
@@ -58,8 +59,11 @@ func runPrint(url string) error {
 	var doc *html.Document
 	var err error
 
+	// Load favourites for landing page
+	favStore, _ := favourites.Load()
+
 	if url == "" {
-		doc, err = landingPage()
+		doc, err = landingPage(favStore)
 	} else {
 		doc, err = fetchAndParseQuiet(url)
 	}
@@ -87,9 +91,12 @@ func run(url string) error {
 	var doc *html.Document
 	var err error
 
+	// Load favourites early so landing page can show them
+	favStore, _ := favourites.Load()
+
 	if url == "" {
 		// Show landing page
-		doc, err = landingPage()
+		doc, err = landingPage(favStore)
 		url = "browse://home"
 	} else {
 		// Fetch the page
@@ -201,6 +208,11 @@ func run(url string) error {
 	var searchInput string                      // search query being entered
 	var structureViewer *inspector.Viewer       // DOM structure viewer
 	searchProvider := search.DefaultProvider()  // web search provider
+
+	// Favourites mode state (favStore loaded at start of run())
+	favouritesMode := false      // showing favourites overlay
+	favouritesScrollOffset := 0  // scroll position within favourites
+	favouritesDeleteMode := false // waiting for label to delete
 
 	// Define navigateTo helper - navigates within current buffer (updates history)
 	navigateTo = func(newURL string, newDoc *html.Document, newHTML string) {
@@ -462,6 +474,105 @@ func run(url string) error {
 
 			// Footer hint
 			hint := " label=switch  x=close  gt/gT=next/prev  ESC=cancel "
+			hintX := startX + (boxWidth-len(hint))/2
+			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
+		}
+		if favouritesMode && favStore != nil {
+			canvas.DimAll()
+			labels = document.GenerateLabels(favStore.Len())
+
+			// Draw favourites list as centered overlay box
+			boxWidth := 70
+			if boxWidth > width-4 {
+				boxWidth = width - 4
+			}
+			boxHeight := favStore.Len() + 4
+			if boxHeight < 6 {
+				boxHeight = 6 // minimum size
+			}
+			if boxHeight > height-4 {
+				boxHeight = height - 4
+			}
+
+			startX := (width - boxWidth) / 2
+			startY := (height - boxHeight) / 2
+
+			// Clear box area
+			for by := startY; by < startY+boxHeight; by++ {
+				for bx := startX; bx < startX+boxWidth; bx++ {
+					canvas.Set(bx, by, ' ', render.Style{})
+				}
+			}
+
+			// Draw border
+			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
+
+			// Title
+			title := fmt.Sprintf(" Favourites (%d) ", favStore.Len())
+			if favouritesDeleteMode {
+				title = " DELETE: type label to remove "
+			}
+			titleX := startX + (boxWidth-len(title))/2
+			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+			if favStore.Len() == 0 {
+				// Empty state
+				emptyMsg := "No favourites yet. Press M on any page to add."
+				msgX := startX + (boxWidth-len(emptyMsg))/2
+				canvas.WriteString(msgX, startY+2, emptyMsg, render.Style{Dim: true})
+			} else {
+				// Draw favourites with labels
+				by := startY + 2
+				visibleCount := boxHeight - 4
+				for i := favouritesScrollOffset; i < favStore.Len() && i < favouritesScrollOffset+visibleCount; i++ {
+					if i >= len(labels) {
+						break
+					}
+
+					fav := favStore.Favourites[i]
+					bx := startX + 2
+
+					// Format: [label] title (truncated URL)
+					label := labels[i]
+
+					// Draw label (highlighted, red if delete mode)
+					labelStyle := render.Style{Reverse: true, Bold: true}
+					if favouritesDeleteMode {
+						labelStyle.Reverse = false
+						labelStyle.Bold = true
+					}
+					for j, ch := range label {
+						canvas.Set(bx+j, by, ch, labelStyle)
+					}
+
+					// Title
+					displayTitle := fav.Title
+					if displayTitle == "" {
+						displayTitle = fav.URL
+					}
+					maxLen := boxWidth - len(label) - 6
+					if len(displayTitle) > maxLen {
+						displayTitle = displayTitle[:maxLen-3] + "..."
+					}
+					canvas.WriteString(bx+len(label)+2, by, displayTitle, render.Style{})
+
+					by++
+				}
+
+				// Scroll indicators
+				if favouritesScrollOffset > 0 {
+					canvas.WriteString(startX+boxWidth-4, startY+2, "↑", render.Style{Dim: true})
+				}
+				if favouritesScrollOffset+visibleCount < favStore.Len() {
+					canvas.WriteString(startX+boxWidth-4, startY+boxHeight-3, "↓", render.Style{Dim: true})
+				}
+			}
+
+			// Footer hint
+			hint := " label=open  d=delete mode  ESC=cancel "
+			if favouritesDeleteMode {
+				hint = " label=DELETE  ESC=cancel "
+			}
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
@@ -1065,6 +1176,99 @@ func run(url string) error {
 			continue
 		}
 
+		// Favourites mode input handling
+		if favouritesMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel favourites mode
+				favouritesMode = false
+				favouritesDeleteMode = false
+				jumpInput = ""
+				favouritesScrollOffset = 0
+				redraw()
+
+			case buf[0] == 'j': // Scroll down
+				favouritesScrollOffset++
+				if favouritesScrollOffset > favStore.Len()-1 {
+					favouritesScrollOffset = favStore.Len() - 1
+				}
+				if favouritesScrollOffset < 0 {
+					favouritesScrollOffset = 0
+				}
+				redraw()
+
+			case buf[0] == 'k': // Scroll up
+				favouritesScrollOffset--
+				if favouritesScrollOffset < 0 {
+					favouritesScrollOffset = 0
+				}
+				redraw()
+
+			case buf[0] == 'd' && !favouritesDeleteMode: // Enter delete mode
+				favouritesDeleteMode = true
+				jumpInput = ""
+				redraw()
+
+			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k' && buf[0] != 'd':
+				jumpInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				for i, label := range labels {
+					if label == jumpInput && i < favStore.Len() {
+						matched = true
+						if favouritesDeleteMode {
+							// Delete this favourite
+							favStore.Remove(i)
+							favStore.Save()
+							favouritesDeleteMode = false
+							jumpInput = ""
+							// Adjust scroll if needed
+							if favouritesScrollOffset >= favStore.Len() && favouritesScrollOffset > 0 {
+								favouritesScrollOffset = favStore.Len() - 1
+							}
+							redraw()
+						} else {
+							// Open this favourite
+							fav := favStore.Favourites[i]
+							favouritesMode = false
+							jumpInput = ""
+							favouritesScrollOffset = 0
+
+							// Show loading
+							loading = true
+							redraw()
+
+							// Fetch the page
+							newDoc, rawHTML, err := fetchQuietWithHTML(fav.URL)
+							loading = false
+							if err == nil {
+								navigateTo(fav.URL, newDoc, rawHTML)
+							}
+							redraw()
+						}
+						break
+					}
+				}
+
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						// Invalid input, reset
+						jumpInput = ""
+						redraw()
+					}
+				}
+			}
+			continue
+		}
+
 		// URL input mode handling
 		if urlMode {
 			switch {
@@ -1319,6 +1523,38 @@ func run(url string) error {
 			jumpInput = ""
 			redraw()
 
+		case buf[0] == '\'': // favourites list
+			favouritesMode = true
+			favouritesScrollOffset = 0
+			favouritesDeleteMode = false
+			jumpInput = ""
+			redraw()
+
+		case buf[0] == 'M': // add current page to favourites
+			if url != "" && url != "browse://home" && favStore != nil {
+				// Get page title from first heading, or use URL
+				title := url
+				headings := renderer.Headings()
+				if len(headings) > 0 && headings[0].Text != "" {
+					title = headings[0].Text
+				}
+				if favStore.Add(url, title) {
+					favStore.Save()
+					// Show brief confirmation
+					canvas.Clear()
+					canvas.WriteString(width/2-10, height/2, "Added to favourites!", render.Style{Bold: true})
+					canvas.RenderTo(os.Stdout)
+					time.Sleep(300 * time.Millisecond)
+				} else {
+					// Already exists
+					canvas.Clear()
+					canvas.WriteString(width/2-12, height/2, "Already in favourites", render.Style{Dim: true})
+					canvas.RenderTo(os.Stdout)
+					time.Sleep(300 * time.Millisecond)
+				}
+				redraw()
+			}
+
 		case buf[0] == 'T' && !gPending: // T - open new buffer (duplicate current page)
 			openNewBuffer(url, doc, currentHTML)
 			redraw()
@@ -1369,7 +1605,7 @@ func run(url string) error {
 			}
 
 		case buf[0] == 'H': // home
-			homeDoc, err := landingPage()
+			homeDoc, err := landingPage(favStore)
 			if err == nil {
 				navigateTo("browse://home", homeDoc, "")
 				redraw()
@@ -2046,7 +2282,22 @@ func copyToClipboard(text string) error {
 	return cmd.Run()
 }
 
-func landingPage() (*html.Document, error) {
+func landingPage(favStore *favourites.Store) (*html.Document, error) {
+	// Build favourites section if we have any
+	var favouritesSection string
+	if favStore != nil && favStore.Len() > 0 {
+		favouritesSection = "\n<h2>Favourites</h2>\n<ul>\n"
+		for _, fav := range favStore.Favourites {
+			// Escape HTML in title
+			title := strings.ReplaceAll(fav.Title, "&", "&amp;")
+			title = strings.ReplaceAll(title, "<", "&lt;")
+			title = strings.ReplaceAll(title, ">", "&gt;")
+			title = strings.ReplaceAll(title, "\"", "&quot;")
+			favouritesSection += fmt.Sprintf("<li><a href=\"%s\">%s</a></li>\n", fav.URL, title)
+		}
+		favouritesSection += "</ul>\n"
+	}
+
 	page := `<!DOCTYPE html>
 <html>
 <head><title>Browse - Terminal Web Browser</title></head>
@@ -2074,6 +2325,8 @@ func landingPage() (*html.Document, error) {
 <strong>T</strong> - new buffer |
 <strong>gt/gT</strong> - next/prev buffer |
 <strong>&#96;</strong> - buffer list |
+<strong>M</strong> - add favourite |
+<strong>'</strong> - favourites list |
 <strong>H</strong> - home |
 <strong>s</strong> - structure inspector |
 <strong>w</strong> - wide mode |
@@ -2082,7 +2335,7 @@ func landingPage() (*html.Document, error) {
 <strong>R</strong> - generate AI rules |
 <strong>q</strong> - quit
 </p>
-
+` + favouritesSection + `
 <h2>News</h2>
 <ul>
 <li><a href="https://www.bbc.com/news">BBC News</a> - British Broadcasting Corporation</li>
