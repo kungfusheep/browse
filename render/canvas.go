@@ -183,3 +183,21 @@ func (c *Canvas) RenderTo(w *os.File) error {
 	_, err := w.WriteString(c.Render())
 	return err
 }
+
+// PlainText returns the canvas content as plain text without ANSI codes.
+// Uses the same render output but strips escape sequences.
+func (c *Canvas) PlainText() string {
+	rendered := c.Render()
+	stripped := StripANSI(rendered)
+	// Trim trailing whitespace from each line and remove trailing blank lines
+	lines := strings.Split(stripped, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		cleaned = append(cleaned, strings.TrimRight(line, " "))
+	}
+	// Remove trailing empty lines
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	return strings.Join(cleaned, "\n") + "\n"
+}

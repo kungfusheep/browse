@@ -1060,6 +1060,79 @@ func run(url string) error {
 			}
 			redraw()
 
+		case buf[0] == 'E': // Edit in vim
+			// Render full document to get formatted content
+			fullHeight := contentHeight + 10
+			if fullHeight < height {
+				fullHeight = height
+			}
+			editCanvas := render.NewCanvas(width, fullHeight)
+			editRenderer := document.NewRendererWide(editCanvas, wideMode)
+			editRenderer.Render(doc, 0)
+			content := editCanvas.PlainText()
+
+			// Write to temp file
+			tmpFile, err := os.CreateTemp("", "browse-*.txt")
+			if err != nil {
+				redraw()
+				continue
+			}
+			tmpPath := tmpFile.Name()
+			tmpFile.WriteString(content)
+			tmpFile.Close()
+
+			// Restore terminal for vim
+			term.RestoreMode()
+			render.ExitAltScreen(os.Stdout)
+
+			// Launch vim (or $EDITOR)
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vim"
+			}
+			cmd := exec.Command(editor, tmpPath)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Run()
+
+			// Read back edited content
+			editedContent, err := os.ReadFile(tmpPath)
+			os.Remove(tmpPath)
+
+			// Re-enter raw mode and alt screen
+			render.EnterAltScreen(os.Stdout)
+			term.EnterRawMode()
+
+			// If content was edited, create a simple document from it
+			if err == nil && string(editedContent) != content {
+				// Create a simple document with the edited text
+				editedDoc := &html.Document{
+					Content: &html.Node{Type: html.NodeDocument},
+				}
+				// Split into paragraphs
+				paragraphs := strings.Split(string(editedContent), "\n\n")
+				for _, p := range paragraphs {
+					p = strings.TrimSpace(p)
+					if p != "" {
+						para := &html.Node{Type: html.NodeParagraph}
+						para.Children = append(para.Children, &html.Node{
+							Type: html.NodeText,
+							Text: p,
+						})
+						editedDoc.Content.Children = append(editedDoc.Content.Children, para)
+					}
+				}
+				doc = editedDoc
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height + 2
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				scrollY = 0
+			}
+			redraw()
+
 		case buf[0] == 'j', buf[0] == 14:
 			scrollY++
 			if scrollY > maxScroll {
@@ -1094,6 +1167,58 @@ func run(url string) error {
 
 		case buf[0] == 'G':
 			scrollY = maxScroll
+			redraw()
+
+		case buf[0] == '[': // Previous paragraph
+			paragraphs := renderer.Paragraphs()
+			for i := len(paragraphs) - 1; i >= 0; i-- {
+				if paragraphs[i] < scrollY {
+					scrollY = paragraphs[i]
+					if scrollY < 0 {
+						scrollY = 0
+					}
+					break
+				}
+			}
+			redraw()
+
+		case buf[0] == ']': // Next paragraph
+			paragraphs := renderer.Paragraphs()
+			for _, p := range paragraphs {
+				if p > scrollY {
+					scrollY = p
+					if scrollY > maxScroll {
+						scrollY = maxScroll
+					}
+					break
+				}
+			}
+			redraw()
+
+		case buf[0] == '{': // Previous section (heading)
+			headings := renderer.Headings()
+			for i := len(headings) - 1; i >= 0; i-- {
+				if headings[i].Y < scrollY {
+					scrollY = headings[i].Y
+					if scrollY < 0 {
+						scrollY = 0
+					}
+					break
+				}
+			}
+			redraw()
+
+		case buf[0] == '}': // Next section (heading)
+			headings := renderer.Headings()
+			for _, h := range headings {
+				if h.Y > scrollY {
+					scrollY = h.Y
+					if scrollY > maxScroll {
+						scrollY = maxScroll
+					}
+					break
+				}
+			}
 			redraw()
 
 		case buf[0] == ' ':
@@ -1443,8 +1568,11 @@ func landingPage() (*html.Document, error) {
 <strong>j/k</strong> - scroll down/up |
 <strong>d/u</strong> - half page down/up |
 <strong>g/G</strong> - top/bottom |
+<strong>[/]</strong> - prev/next paragraph |
+<strong>{/}</strong> - prev/next section |
 <strong>o</strong> - open URL |
 <strong>y</strong> - copy URL |
+<strong>E</strong> - edit in $EDITOR |
 <strong>f</strong> - follow link |
 <strong>t</strong> - table of contents |
 <strong>n</strong> - site navigation |

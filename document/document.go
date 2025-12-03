@@ -46,6 +46,7 @@ type Renderer struct {
 	links        []Link
 	inputs       []Input
 	headings     []Heading
+	paragraphs   []int // Y positions of paragraph-like elements for navigation
 
 	// Current form context (for inputs)
 	currentFormAction string
@@ -91,6 +92,7 @@ func (r *Renderer) Render(doc *html.Document, scrollY int) {
 	r.links = nil       // reset links for this render
 	r.inputs = nil      // reset inputs for this render
 	r.headings = nil    // reset headings for this render
+	r.paragraphs = nil  // reset paragraphs for this render
 
 	// Reset form context
 	r.currentFormAction = ""
@@ -119,6 +121,11 @@ func (r *Renderer) Inputs() []Input {
 // Headings returns the section headings from the last render.
 func (r *Renderer) Headings() []Heading {
 	return r.headings
+}
+
+// Paragraphs returns the Y positions of paragraph-like elements for navigation.
+func (r *Renderer) Paragraphs() []int {
+	return r.paragraphs
 }
 
 // ContentHeight returns the total height needed for the document.
@@ -170,6 +177,14 @@ func (r *Renderer) nodeHeight(n *html.Node, textWidth int) int {
 }
 
 func (r *Renderer) renderNode(n *html.Node) {
+	// Track paragraph position for navigation (absolute Y position)
+	switch n.Type {
+	case html.NodeHeading1, html.NodeHeading2, html.NodeHeading3,
+		html.NodeParagraph, html.NodeBlockquote, html.NodeList,
+		html.NodeCodeBlock, html.NodeTable:
+		r.paragraphs = append(r.paragraphs, r.y+r.scrollY)
+	}
+
 	switch n.Type {
 	case html.NodeHeading1:
 		r.renderHeading1(n)
