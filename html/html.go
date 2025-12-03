@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"browse/latex"
 	"golang.org/x/net/html"
 )
 
@@ -361,6 +362,10 @@ func extractContentOnly(n *html.Node, parent *Node) {
 			// Capture significant text content not wrapped in elements
 			text := strings.TrimSpace(c.Data)
 			if text != "" && len(text) > 1 {
+				// Process any LaTeX in the text
+				if latex.ContainsLaTeX(text) {
+					text = latex.ProcessText(text)
+				}
 				// Create an implicit paragraph for loose text
 				node := &Node{Type: NodeParagraph}
 				node.Children = append(node.Children, &Node{Type: NodeText, Text: text})
@@ -841,6 +846,10 @@ func extractInline(n *html.Node, parent *Node) {
 		case html.TextNode:
 			text := c.Data
 			if text != "" {
+				// Process any LaTeX in the text
+				if latex.ContainsLaTeX(text) {
+					text = latex.ProcessText(text)
+				}
 				parent.Children = append(parent.Children, &Node{Type: NodeText, Text: text})
 			}
 
@@ -878,12 +887,52 @@ func textContent(n *html.Node) string {
 		if n.Type == html.TextNode {
 			sb.WriteString(n.Data)
 		}
+		// Handle MathML <math> elements - extract annotation with LaTeX
+		if n.Type == html.ElementNode && n.Data == "math" {
+			// Look for annotation with LaTeX encoding
+			latexContent := extractMathMLLatex(n)
+			if latexContent != "" {
+				sb.WriteString(latex.ToUnicode(latexContent))
+				return // Don't recurse into math element
+			}
+		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			extract(c)
 		}
 	}
 	extract(n)
-	return strings.TrimSpace(sb.String())
+
+	// Process any remaining LaTeX in the text
+	text := strings.TrimSpace(sb.String())
+	if latex.ContainsLaTeX(text) {
+		text = latex.ProcessText(text)
+	}
+	return text
+}
+
+// extractMathMLLatex extracts LaTeX from MathML annotation elements.
+func extractMathMLLatex(mathNode *html.Node) string {
+	var findAnnotation func(*html.Node) string
+	findAnnotation = func(n *html.Node) string {
+		if n.Type == html.ElementNode && n.Data == "annotation" {
+			encoding := getAttr(n, "encoding")
+			if strings.Contains(encoding, "latex") || strings.Contains(encoding, "tex") {
+				// Get text content of annotation
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					if c.Type == html.TextNode {
+						return c.Data
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if result := findAnnotation(c); result != "" {
+				return result
+			}
+		}
+		return ""
+	}
+	return findAnnotation(mathNode)
 }
 
 // textContentDeduped extracts text and removes duplicated fragments.

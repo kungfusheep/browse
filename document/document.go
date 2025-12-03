@@ -710,6 +710,11 @@ func (r *Renderer) renderTable(n *html.Node) {
 			continue
 		}
 
+		// Skip empty rows
+		if isEmptyRow(row) {
+			continue
+		}
+
 		r.drawTableRow(tableX, row, colWidths)
 		r.y++
 
@@ -750,8 +755,9 @@ func (r *Renderer) calculateColumnWidths(table *html.Node) []int {
 				break
 			}
 			text := cell.PlainText()
-			if len(text) > widths[i] {
-				widths[i] = len(text)
+			textWidth := render.StringWidth(text)
+			if textWidth > widths[i] {
+				widths[i] = textWidth
 			}
 		}
 	}
@@ -814,6 +820,29 @@ func (r *Renderer) drawTableBorder(x int, colWidths []int, left, mid, right rune
 	}
 }
 
+// isEmptyRow checks if a table row has no visible content.
+func isEmptyRow(row *html.Node) bool {
+	for _, cell := range row.Children {
+		if strings.TrimSpace(cell.PlainText()) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// truncateToWidth truncates a string to fit within maxWidth visual columns.
+func truncateToWidth(s string, maxWidth int) string {
+	width := 0
+	for i, r := range s {
+		rw := render.UnicodeWidth(r)
+		if width+rw > maxWidth {
+			return s[:i]
+		}
+		width += rw
+	}
+	return s
+}
+
 func (r *Renderer) drawTableRow(x int, row *html.Node, colWidths []int) {
 	style := render.Style{Dim: true}
 	pos := x
@@ -840,13 +869,15 @@ func (r *Renderer) drawTableRow(x int, row *html.Node, colWidths []int) {
 			}
 		}
 
-		// Truncate if needed
-		if len(cellText) > width {
-			cellText = cellText[:width-1] + "…"
+		// Truncate if needed (accounting for Unicode width)
+		cellWidth := render.StringWidth(cellText)
+		if cellWidth > width {
+			cellText = truncateToWidth(cellText, width-1) + "…"
+			cellWidth = render.StringWidth(cellText)
 		}
 
 		// Pad to width
-		padding := width - len(cellText)
+		padding := width - cellWidth
 		leftPad := padding / 2
 		rightPad := padding - leftPad
 
