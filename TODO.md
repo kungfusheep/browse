@@ -5,7 +5,6 @@ work on landing experience
 AI formatting still needs a lot of work
 inspector still needs work 
 
-grey out the page text when we have a dialogue open 
 suggest some features
 search box
 tabs? (buffers?)

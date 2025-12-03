@@ -22,6 +22,7 @@ import (
 	"browse/llm"
 	"browse/render"
 	"browse/rules"
+	"browse/search"
 )
 
 func main() {
@@ -162,6 +163,7 @@ func run(url string) error {
 	linkIndexMode := false   // showing link index overlay
 	linkScrollOffset := 0    // scroll position within link index
 	urlMode := false         // entering a URL
+	searchMode := false      // entering a search query
 	loading := false         // currently loading a page
 	structureMode := false   // showing DOM structure inspector
 	jumpInput := ""
@@ -170,7 +172,9 @@ func run(url string) error {
 	var activeInput *document.Input             // currently selected input
 	var enteredText string                      // text being entered
 	var urlInput string                         // URL being entered
+	var searchInput string                      // search query being entered
 	var structureViewer *inspector.Viewer       // DOM structure viewer
+	searchProvider := search.DefaultProvider()  // web search provider
 
 	// Handle terminal resize
 	resizeCh := make(chan os.Signal, 1)
@@ -353,6 +357,46 @@ func run(url string) error {
 
 			// Hint
 			hint := " Enter to go, ESC to cancel "
+			hintX := startX + (boxWidth-len(hint))/2
+			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
+		}
+		if searchMode {
+			canvas.DimAll()
+			// Draw search input as centered overlay box
+			boxWidth := 60
+			if boxWidth > width-4 {
+				boxWidth = width - 4
+			}
+			boxHeight := 5
+			startX := (width - boxWidth) / 2
+			startY := (height - boxHeight) / 2
+
+			// Clear box area
+			for y := startY; y < startY+boxHeight; y++ {
+				for x := startX; x < startX+boxWidth; x++ {
+					canvas.Set(x, y, ' ', render.Style{})
+				}
+			}
+
+			// Draw border
+			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
+
+			// Title
+			title := fmt.Sprintf(" Search (%s) ", searchProvider.Name())
+			titleX := startX + (boxWidth-len(title))/2
+			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+			// Search input field
+			inputY := startY + 2
+			maxQueryWidth := boxWidth - 4
+			displayQuery := searchInput
+			if len(displayQuery) > maxQueryWidth-1 {
+				displayQuery = displayQuery[len(displayQuery)-maxQueryWidth+1:]
+			}
+			canvas.WriteString(startX+2, inputY, displayQuery+"█", render.Style{})
+
+			// Hint
+			hint := " Enter to search, ESC to cancel "
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
@@ -864,6 +908,66 @@ func run(url string) error {
 			continue
 		}
 
+		// Search mode input handling
+		if searchMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel search mode
+				searchMode = false
+				searchInput = ""
+				redraw()
+
+			case buf[0] == 13 || buf[0] == 10: // Enter - execute search
+				if searchInput != "" {
+					searchMode = false
+					query := searchInput
+					searchInput = ""
+					loading = true
+
+					// Show loading status
+					canvas.Clear()
+					canvas.WriteString(width/2-10, height/2, "Searching...", render.Style{Bold: true})
+					canvas.RenderTo(os.Stdout)
+
+					results, err := searchProvider.Search(query)
+					loading = false
+					if err == nil && results != nil {
+						// Convert results to HTML and parse as document
+						htmlContent := results.ToHTML()
+						newDoc, parseErr := html.ParseString(htmlContent)
+						if parseErr == nil {
+							forwardHistory = nil
+							history = append(history, historyEntry{
+								url:     url,
+								doc:     doc,
+								scrollY: scrollY,
+							})
+							doc = newDoc
+							url = "search://" + query
+							currentHTML = htmlContent
+							contentHeight = renderer.ContentHeight(doc)
+							maxScroll = contentHeight - height
+							if maxScroll < 0 {
+								maxScroll = 0
+							}
+							scrollY = 0
+						}
+					}
+					redraw()
+				}
+
+			case buf[0] == 127 || buf[0] == 8: // Backspace
+				if len(searchInput) > 0 {
+					searchInput = searchInput[:len(searchInput)-1]
+					redraw()
+				}
+
+			case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
+				searchInput += string(buf[0])
+				redraw()
+			}
+			continue
+		}
+
 		// Structure inspector mode input handling
 		if structureMode && structureViewer != nil {
 			switch {
@@ -1202,6 +1306,11 @@ func run(url string) error {
 		case buf[0] == 'o': // open URL
 			urlMode = true
 			urlInput = ""
+			redraw()
+
+		case buf[0] == '/': // search the web
+			searchMode = true
+			searchInput = ""
 			redraw()
 
 		case buf[0] == 'y': // yank (copy) URL to clipboard
@@ -1728,6 +1837,7 @@ func landingPage() (*html.Document, error) {
 <strong>[/]</strong> - prev/next paragraph |
 <strong>{/}</strong> - prev/next section |
 <strong>o</strong> - open URL |
+<strong>/</strong> - web search |
 <strong>y</strong> - copy URL |
 <strong>E</strong> - edit in $EDITOR |
 <strong>f</strong> - follow link |
