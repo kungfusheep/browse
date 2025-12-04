@@ -33,3 +33,15 @@ type Provider interface {
 func DefaultProvider() Provider {
 	return NewDuckDuckGo()
 }
+
+// ProviderByName returns a provider by name.
+// Falls back to DuckDuckGo if the name is unrecognized.
+func ProviderByName(name string) Provider {
+	switch name {
+	case "duckduckgo", "ddg":
+		return NewDuckDuckGo()
+	default:
+		// Fall back to DuckDuckGo for unknown providers
+		return NewDuckDuckGo()
+	}
+}

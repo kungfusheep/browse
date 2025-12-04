@@ -24,6 +24,46 @@ type FetchResult struct {
 	FetchTime   time.Duration
 }
 
+// Options configures the fetcher behavior.
+type Options struct {
+	UserAgent      string
+	TimeoutSeconds int
+	ChromePath     string // Path to Chrome binary (empty = auto-detect)
+}
+
+// DefaultOptions returns sensible defaults.
+func DefaultOptions() Options {
+	return Options{
+		UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		TimeoutSeconds: 30,
+		ChromePath:     "",
+	}
+}
+
+// Package-level options (set via Configure)
+var opts = DefaultOptions()
+
+// Configure sets the package-level options.
+func Configure(o Options) {
+	if o.UserAgent != "" {
+		opts.UserAgent = o.UserAgent
+	}
+	if o.TimeoutSeconds > 0 {
+		opts.TimeoutSeconds = o.TimeoutSeconds
+	}
+	opts.ChromePath = o.ChromePath // Can be empty
+}
+
+// UserAgent returns the currently configured user agent string.
+func UserAgent() string {
+	return opts.UserAgent
+}
+
+// Timeout returns the currently configured timeout duration.
+func Timeout() time.Duration {
+	return time.Duration(opts.TimeoutSeconds) * time.Second
+}
+
 // Realistic Chrome user agent
 const chromeUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -72,9 +112,12 @@ func Simple(url string) (*FetchResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", chromeUserAgent)
+	req.Header.Set("User-Agent", opts.UserAgent)
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{
+		Timeout: time.Duration(opts.TimeoutSeconds) * time.Second,
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching %s: %w", url, err)
 	}
@@ -176,7 +219,7 @@ func WithBrowserVisible(targetURL string) (*FetchResult, error) {
 func withBrowserGoogle(targetURL string) (*FetchResult, error) {
 	start := time.Now()
 
-	opts := []chromedp.ExecAllocatorOption{
+	allocOpts := []chromedp.ExecAllocatorOption{
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.NoFirstRun,
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -190,16 +233,27 @@ func withBrowserGoogle(targetURL string) (*FetchResult, error) {
 		chromedp.Flag("no-service-autorun", true),
 		chromedp.Flag("password-store", "basic"),
 		chromedp.Flag("use-mock-keychain", true),
-		chromedp.UserAgent(chromeUserAgent),
+		chromedp.UserAgent(opts.UserAgent),
 		chromedp.WindowSize(1920, 1080),
 		chromedp.UserDataDir(userDataDir()),
 		chromedp.Flag("headless", "new"),
 	}
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	// Add custom Chrome path if specified
+	if opts.ChromePath != "" {
+		allocOpts = append(allocOpts, chromedp.ExecPath(opts.ChromePath))
+	}
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 	defer allocCancel()
 
-	ctx, cancel := context.WithTimeout(allocCtx, 60*time.Second)
+	timeout := time.Duration(opts.TimeoutSeconds) * time.Second
+	if timeout < 30*time.Second {
+		timeout = 60 * time.Second // Browser fetches need more time
+	} else {
+		timeout = timeout * 2 // Double the timeout for browser fetches
+	}
+	ctx, cancel := context.WithTimeout(allocCtx, timeout)
 	defer cancel()
 
 	ctx, cancel = chromedp.NewContext(ctx)
@@ -278,7 +332,7 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 	start := time.Now()
 
 	// Create allocator with anti-detection options
-	opts := []chromedp.ExecAllocatorOption{
+	allocOpts := []chromedp.ExecAllocatorOption{
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.NoFirstRun,
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -292,7 +346,7 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 		chromedp.Flag("no-service-autorun", true),
 		chromedp.Flag("password-store", "basic"),
 		chromedp.Flag("use-mock-keychain", true),
-		chromedp.UserAgent(chromeUserAgent),
+		chromedp.UserAgent(opts.UserAgent),
 		chromedp.WindowSize(1920, 1080),
 		// Use persistent user data directory for cookies
 		chromedp.UserDataDir(userDataDir()),
@@ -301,14 +355,25 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 	// Add headless flag based on parameter
 	if headless {
 		// Use new headless mode (more like regular Chrome)
-		opts = append(opts, chromedp.Flag("headless", "new"))
+		allocOpts = append(allocOpts, chromedp.Flag("headless", "new"))
 	}
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	// Add custom Chrome path if specified
+	if opts.ChromePath != "" {
+		allocOpts = append(allocOpts, chromedp.ExecPath(opts.ChromePath))
+	}
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 	defer allocCancel()
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(allocCtx, 45*time.Second)
+	// Create context with timeout (browser fetches get extra time)
+	timeout := time.Duration(opts.TimeoutSeconds) * time.Second
+	if timeout < 30*time.Second {
+		timeout = 45 * time.Second
+	} else {
+		timeout = timeout + 15*time.Second
+	}
+	ctx, cancel := context.WithTimeout(allocCtx, timeout)
 	defer cancel()
 
 	// Create browser context

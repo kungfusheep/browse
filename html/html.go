@@ -9,6 +9,38 @@ import (
 	"golang.org/x/net/html"
 )
 
+// Options configures HTML parsing behavior.
+type Options struct {
+	LatexEnabled  bool // Process LaTeX math expressions
+	TablesEnabled bool // Parse and render HTML tables
+}
+
+// DefaultOptions returns the default parsing options.
+func DefaultOptions() Options {
+	return Options{
+		LatexEnabled:  true,
+		TablesEnabled: true,
+	}
+}
+
+// Package-level options (set via Configure)
+var opts = DefaultOptions()
+
+// Configure sets the package-level parsing options.
+func Configure(o Options) {
+	opts = o
+}
+
+// latexEnabled returns whether LaTeX processing is enabled.
+func latexEnabled() bool {
+	return opts.LatexEnabled
+}
+
+// tablesEnabled returns whether table parsing is enabled.
+func tablesEnabled() bool {
+	return opts.TablesEnabled
+}
+
 // Document represents a parsed HTML document with separate content and navigation.
 type Document struct {
 	Content    *Node   // Main article content
@@ -298,8 +330,12 @@ func extractContentOnly(n *html.Node, parent *Node) {
 				extractContentOnly(c, parent)
 
 			case "table":
-				// Handle tables by extracting rows
-				extractTable(c, parent)
+				// Handle tables by extracting rows (or just content if tables disabled)
+				if tablesEnabled() {
+					extractTable(c, parent)
+				} else {
+					extractContentOnly(c, parent) // Fall back to plain text extraction
+				}
 
 			case "main", "section", "div", "span",
 				"center", "nobr", "tbody", "b", "i", "u", "font":
@@ -363,7 +399,7 @@ func extractContentOnly(n *html.Node, parent *Node) {
 			text := strings.TrimSpace(c.Data)
 			if text != "" && len(text) > 1 {
 				// Process any LaTeX in the text
-				if latex.ContainsLaTeX(text) {
+				if latexEnabled() && latex.ContainsLaTeX(text) {
 					text = latex.ProcessText(text)
 				}
 				// Create an implicit paragraph for loose text
@@ -847,7 +883,7 @@ func extractInline(n *html.Node, parent *Node) {
 			text := c.Data
 			if text != "" {
 				// Process any LaTeX in the text
-				if latex.ContainsLaTeX(text) {
+				if latexEnabled() && latex.ContainsLaTeX(text) {
 					text = latex.ProcessText(text)
 				}
 				parent.Children = append(parent.Children, &Node{Type: NodeText, Text: text})
@@ -888,7 +924,7 @@ func textContent(n *html.Node) string {
 			sb.WriteString(n.Data)
 		}
 		// Handle MathML <math> elements - extract annotation with LaTeX
-		if n.Type == html.ElementNode && n.Data == "math" {
+		if latexEnabled() && n.Type == html.ElementNode && n.Data == "math" {
 			// Look for annotation with LaTeX encoding
 			latexContent := extractMathMLLatex(n)
 			if latexContent != "" {
@@ -904,7 +940,7 @@ func textContent(n *html.Node) string {
 
 	// Process any remaining LaTeX in the text
 	text := strings.TrimSpace(sb.String())
-	if latex.ContainsLaTeX(text) {
+	if latexEnabled() && latex.ContainsLaTeX(text) {
 		text = latex.ProcessText(text)
 	}
 	return text

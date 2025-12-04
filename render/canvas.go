@@ -84,16 +84,18 @@ func (c *Canvas) Get(x, y int) Cell {
 }
 
 // WriteString writes a string starting at the given position.
+// Returns the number of terminal cells used (not runes).
 func (c *Canvas) WriteString(x, y int, s string, style Style) int {
-	written := 0
+	pos := 0
 	for _, r := range s {
-		if x+written >= c.width {
+		w := UnicodeWidth(r)
+		if x+pos+w > c.width {
 			break
 		}
-		c.Set(x+written, y, r, style)
-		written++
+		c.Set(x+pos, y, r, style)
+		pos += w // Advance by character width (1 for normal, 2 for wide)
 	}
-	return written
+	return pos
 }
 
 // DrawBox draws a box on the canvas.
@@ -130,14 +132,29 @@ func (c *Canvas) DrawBoxWithTitle(x, y, width, height int, title string, box Box
 	c.DrawBox(x, y, width, height, box, style)
 
 	if len(title) > 0 && width > 4 {
-		maxTitleLen := width - 4
-		if len(title) > maxTitleLen {
-			title = title[:maxTitleLen]
+		maxTitleWidth := width - 4
+		titleWidth := StringWidth(title)
+
+		// Truncate title if too wide (by runes, checking width)
+		if titleWidth > maxTitleWidth {
+			truncated := ""
+			w := 0
+			for _, r := range title {
+				rw := UnicodeWidth(r)
+				if w+rw > maxTitleWidth {
+					break
+				}
+				truncated += string(r)
+				w += rw
+			}
+			title = truncated
+			titleWidth = w
 		}
+
 		titleX := x + 2
 		c.Set(titleX-1, y, ' ', style)
 		c.WriteString(titleX, y, title, titleStyle)
-		c.Set(titleX+len(title), y, ' ', style)
+		c.Set(titleX+titleWidth, y, ' ', style)
 	}
 }
 

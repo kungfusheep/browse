@@ -32,6 +32,19 @@ type Style struct {
 	FgColor   int // ANSI foreground color code (0 = default, 32 = green, 33 = yellow, etc.)
 }
 
+// ANSI foreground color codes
+const (
+	ColorDefault = 0
+	ColorBlack   = 30
+	ColorRed     = 31
+	ColorGreen   = 32
+	ColorYellow  = 33
+	ColorBlue    = 34
+	ColorMagenta = 35
+	ColorCyan    = 36
+	ColorWhite   = 37
+)
+
 // BoxStyle defines the characters used for drawing boxes.
 type BoxStyle struct {
 	TopLeft     rune
@@ -117,6 +130,28 @@ func isZeroWidth(r rune) bool {
 }
 
 func isWideChar(r rune) bool {
+	// Emoji ranges
+	if (r >= 0x1F300 && r <= 0x1F9FF) || // Misc Symbols, Emoticons, Dingbats, etc.
+		(r >= 0x2600 && r <= 0x26FF) || // Misc symbols (weather, zodiac, etc.)
+		(r >= 0x2700 && r <= 0x27BF) || // Dingbats
+		(r >= 0x1F1E0 && r <= 0x1F1FF) || // Regional indicators (flags)
+		(r >= 0x1F600 && r <= 0x1F64F) || // Emoticons
+		(r >= 0x1F680 && r <= 0x1F6FF) || // Transport and map symbols
+		(r >= 0x1FA00 && r <= 0x1FAFF) || // Chess, extended symbols
+		(r >= 0x231A && r <= 0x231B) || // Watch, Hourglass
+		(r >= 0x23E9 && r <= 0x23F3) || // Media control symbols
+		(r >= 0x23F8 && r <= 0x23FA) || // More media controls
+		(r >= 0x25AA && r <= 0x25AB) || // Small squares
+		(r >= 0x25FB && r <= 0x25FE) || // Medium squares
+		r == 0x25B6 || r == 0x25C0 || // Play buttons
+		r == 0x2934 || r == 0x2935 || // Curved arrows
+		(r >= 0x2B05 && r <= 0x2B07) || // Arrows
+		(r >= 0x2B1B && r <= 0x2B1C) || // Large squares
+		r == 0x2B50 || r == 0x2B55 { // Star, circle
+		return true
+	}
+
+	// CJK and East Asian Wide characters
 	return (r >= 0x1100 && r <= 0x115F) ||
 		(r >= 0x2E80 && r <= 0x2EF3) ||
 		(r >= 0x2F00 && r <= 0x2FD5) ||

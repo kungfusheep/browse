@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"browse/config"
 	"browse/document"
 	"browse/favourites"
 	"browse/fetcher"
@@ -29,16 +31,28 @@ import (
 func main() {
 	url := ""
 	printMode := false
+	initConfig := false
 
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "-p", "--print":
 			printMode = true
+		case "--init-config":
+			initConfig = true
+		case "-h", "--help":
+			printUsage()
+			return
 		default:
 			if url == "" {
 				url = arg
 			}
 		}
+	}
+
+	// Generate default config and exit
+	if initConfig {
+		fmt.Print(config.DefaultPkl())
+		return
 	}
 
 	if printMode {
@@ -55,9 +69,49 @@ func main() {
 	}
 }
 
+func printUsage() {
+	fmt.Println(`Browse - Terminal Web Browser
+
+Usage: browse [options] [url]
+
+Options:
+  -p, --print       Print page to stdout (one-shot mode)
+  --init-config     Output default config (redirect to ~/.config/browse/config.pkl)
+  -h, --help        Show this help
+
+Examples:
+  browse                          Open landing page
+  browse https://example.com      Open URL
+  browse -p https://example.com   Print page to stdout
+  browse --init-config > ~/.config/browse/config.pkl
+
+Configuration:
+  Config file: ~/.config/browse/config.pkl
+  Generate with: browse --init-config > ~/.config/browse/config.pkl`)
+}
+
 func runPrint(url string) error {
 	var doc *html.Document
 	var err error
+
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Configure fetcher with user settings
+	fetcher.Configure(fetcher.Options{
+		UserAgent:      cfg.Fetcher.UserAgent,
+		TimeoutSeconds: cfg.Fetcher.TimeoutSeconds,
+		ChromePath:     cfg.Fetcher.ChromePath,
+	})
+
+	// Configure HTML parsing options
+	html.Configure(html.Options{
+		LatexEnabled:  cfg.Rendering.LatexEnabled,
+		TablesEnabled: cfg.Rendering.TablesEnabled,
+	})
 
 	// Load favourites for landing page
 	favStore, _ := favourites.Load()
@@ -71,8 +125,8 @@ func runPrint(url string) error {
 		return err
 	}
 
-	// Use terminal width if available, otherwise default to 80
-	width := 80
+	// Use terminal width if available, otherwise config default
+	width := cfg.Rendering.DefaultWidth
 	if w, _, werr := render.TerminalSize(); werr == nil {
 		width = w
 	}
@@ -90,6 +144,25 @@ func runPrint(url string) error {
 func run(url string) error {
 	var doc *html.Document
 	var err error
+
+	// Load configuration (defaults + user overrides)
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w\n\n%s", err, config.FormatError(err))
+	}
+
+	// Configure the fetcher with user settings
+	fetcher.Configure(fetcher.Options{
+		UserAgent:      cfg.Fetcher.UserAgent,
+		TimeoutSeconds: cfg.Fetcher.TimeoutSeconds,
+		ChromePath:     cfg.Fetcher.ChromePath,
+	})
+
+	// Configure HTML parsing options
+	html.Configure(html.Options{
+		LatexEnabled:  cfg.Rendering.LatexEnabled,
+		TablesEnabled: cfg.Rendering.TablesEnabled,
+	})
 
 	// Load favourites early so landing page can show them
 	favStore, _ := favourites.Load()
@@ -130,7 +203,7 @@ func run(url string) error {
 
 	// Create canvas and renderer
 	canvas := render.NewCanvas(width, height)
-	wideMode := false // toggle with 'w' for full-width view
+	wideMode := cfg.Display.WideMode // from config, toggle with 'w'
 	renderer := document.NewRendererWide(canvas, wideMode)
 
 	// Set up AI rule generation
@@ -200,6 +273,17 @@ func run(url string) error {
 	structureMode := false   // showing DOM structure inspector
 	jumpInput := ""
 	gPending := false // waiting for second key after 'g'
+
+	// Key matching helpers for configurable bindings
+	key := func(input byte, binding string) bool {
+		return config.MatchSingle(input, binding)
+	}
+	// keyG checks if gPending + input matches a 2-char binding
+	keyG := func(input byte, binding string) bool {
+		return gPending && config.MatchWithPrefix("g", input, binding)
+	}
+	kb := cfg.Keybindings // shorthand for keybindings
+
 	var labels []string
 	var navLinks []document.NavLink             // current navigation links in overlay
 	var activeInput *document.Input             // currently selected input
@@ -207,7 +291,7 @@ func run(url string) error {
 	var urlInput string                         // URL being entered
 	var searchInput string                      // search query being entered
 	var structureViewer *inspector.Viewer       // DOM structure viewer
-	searchProvider := search.DefaultProvider()  // web search provider
+	searchProvider := search.ProviderByName(cfg.Search.DefaultProvider) // web search provider
 
 	// Favourites mode state (favStore loaded at start of run())
 	favouritesMode := false      // showing favourites overlay
@@ -320,7 +404,7 @@ func run(url string) error {
 		}
 
 		var pctStr string
-		if contentHeight > height {
+		if cfg.Display.ShowScrollPercentage && contentHeight > height {
 			pct := 0
 			if maxScroll > 0 {
 				pct = scrollY * 100 / maxScroll
@@ -329,12 +413,17 @@ func run(url string) error {
 		}
 
 		// Draw as dim text - subtle but visible
-		canvas.WriteString(0, statusY, domainDisplay, render.Style{Dim: true})
+		if cfg.Display.ShowUrl {
+			canvas.WriteString(0, statusY, domainDisplay, render.Style{Dim: true})
+		}
 
 		// Show wide mode indicator
 		if wideMode {
 			wideIndicator := "[W]"
-			wideX := len(domainDisplay) + 1
+			wideX := 0
+			if cfg.Display.ShowUrl {
+				wideX = len(domainDisplay) + 1
+			}
 			canvas.WriteString(wideX, statusY, wideIndicator, render.Style{Dim: true})
 		}
 
@@ -708,13 +797,7 @@ func run(url string) error {
 
 						newURL := resolveURL(url, links[i].Href)
 						loading = true
-
-						// Show loading status
-						canvas.Clear()
-						canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
-						canvas.RenderTo(os.Stdout)
-
-						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
+						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 						loading = false
 						if err == nil {
 							navigateTo(newURL, newDoc, htmlContent)
@@ -814,13 +897,8 @@ func run(url string) error {
 					activeInput = nil
 					enteredText = ""
 
-					// Show loading status
-					canvas.Clear()
-					canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
-					canvas.RenderTo(os.Stdout)
-
 					// Navigate to the form result
-					newDoc, htmlContent, err := fetchWithRules(formURL, ruleCache)
+					newDoc, htmlContent, err := fetchWithSpinner(canvas, formURL, ruleCache)
 					if err == nil {
 						navigateTo(formURL, newDoc, htmlContent)
 					}
@@ -939,13 +1017,7 @@ func run(url string) error {
 
 						newURL := resolveURL(url, navLinks[i].Href)
 						loading = true
-
-						// Show loading status
-						canvas.Clear()
-						canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
-						canvas.RenderTo(os.Stdout)
-
-						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
+						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 						loading = false
 						if err == nil {
 							navigateTo(newURL, newDoc, htmlContent)
@@ -1018,13 +1090,7 @@ func run(url string) error {
 
 						newURL := resolveURL(url, links[i].Href)
 						loading = true
-
-						// Show loading status
-						canvas.Clear()
-						canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
-						canvas.RenderTo(os.Stdout)
-
-						newDoc, htmlContent, err := fetchWithRules(newURL, ruleCache)
+						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 						loading = false
 						if err == nil {
 							navigateTo(newURL, newDoc, htmlContent)
@@ -1288,13 +1354,7 @@ func run(url string) error {
 					urlMode = false
 					urlInput = ""
 					loading = true
-
-					// Show loading status on screen
-					canvas.Clear()
-					canvas.WriteString(width/2-10, height/2, "Loading...", render.Style{Bold: true})
-					canvas.RenderTo(os.Stdout)
-
-					newDoc, htmlContent, err := fetchWithRules(targetURL, ruleCache)
+					newDoc, htmlContent, err := fetchWithSpinner(canvas, targetURL, ruleCache)
 					loading = false
 					if err == nil {
 						navigateTo(targetURL, newDoc, htmlContent)
@@ -1436,58 +1496,57 @@ func run(url string) error {
 
 		// Normal mode
 		switch {
-		case buf[0] == 'q':
+		case key(buf[0], kb.Quit):
 			return nil
 
-		case buf[0] == 'f': // follow link - enter jump mode
+		case key(buf[0], kb.FollowLink): // follow link - enter jump mode
 			jumpMode = true
 			jumpInput = ""
 			redraw()
 
-		case buf[0] == 't':
-			if gPending {
-				// gt - next buffer
-				gPending = false
-				if len(buffers) > 1 {
-					buffers[currentBufferIdx].current.scrollY = scrollY
-					currentBufferIdx++
-					if currentBufferIdx >= len(buffers) {
-						currentBufferIdx = 0 // wrap around
-					}
-					b := getCurrentBuffer()
-					doc = b.current.doc
-					url = b.current.url
-					scrollY = b.current.scrollY
-					currentHTML = b.current.html
-					contentHeight = renderer.ContentHeight(doc)
-					maxScroll = contentHeight - height
-					if maxScroll < 0 {
-						maxScroll = 0
-					}
-					redraw()
+		case keyG(buf[0], kb.NextBuffer): // gt - next buffer
+			gPending = false
+			if len(buffers) > 1 {
+				buffers[currentBufferIdx].current.scrollY = scrollY
+				currentBufferIdx++
+				if currentBufferIdx >= len(buffers) {
+					currentBufferIdx = 0 // wrap around
 				}
-			} else if len(renderer.Headings()) > 0 {
-				// t - table of contents
+				b := getCurrentBuffer()
+				doc = b.current.doc
+				url = b.current.url
+				scrollY = b.current.scrollY
+				currentHTML = b.current.html
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				redraw()
+			}
+
+		case key(buf[0], kb.TableOfContents): // t - table of contents
+			if !gPending && len(renderer.Headings()) > 0 {
 				tocMode = true
 				jumpInput = ""
 				redraw()
 			}
 
-		case buf[0] == 'i': // input - enter input mode
+		case key(buf[0], kb.InputField): // input - enter input mode
 			if len(renderer.Inputs()) > 0 {
 				inputMode = true
 				jumpInput = ""
 				redraw()
 			}
 
-		case buf[0] == 'n': // navigation - show nav links overlay
+		case key(buf[0], kb.SiteNavigation): // navigation - show nav links overlay
 			if len(doc.Navigation) > 0 {
 				navMode = true
 				jumpInput = ""
 				redraw()
 			}
 
-		case buf[0] == 'l': // link index - show all page links
+		case key(buf[0], kb.LinkIndex): // link index - show all page links
 			if len(renderer.Links()) > 0 {
 				linkIndexMode = true
 				linkScrollOffset = 0
@@ -1495,7 +1554,7 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == 'B': // forward in history (within current buffer)
+		case key(buf[0], kb.Forward): // forward in history (within current buffer)
 			buf := getCurrentBuffer()
 			if len(buf.forward) > 0 {
 				// Save current to history
@@ -1517,20 +1576,21 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == '`': // buffer list - show all open buffers
+		case key(buf[0], kb.BufferList) || keyG(buf[0], kb.BufferList): // buffer list - show all open buffers
+			gPending = false
 			bufferMode = true
 			bufferScrollOffset = 0
 			jumpInput = ""
 			redraw()
 
-		case buf[0] == '\'': // favourites list
+		case key(buf[0], kb.FavouritesList): // favourites list
 			favouritesMode = true
 			favouritesScrollOffset = 0
 			favouritesDeleteMode = false
 			jumpInput = ""
 			redraw()
 
-		case buf[0] == 'M': // add current page to favourites
+		case key(buf[0], kb.AddFavourite): // add current page to favourites
 			if url != "" && url != "browse://home" && favStore != nil {
 				// Get page title from first heading, or use URL
 				title := url
@@ -1555,11 +1615,11 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == 'T' && !gPending: // T - open new buffer (duplicate current page)
+		case key(buf[0], kb.NewBuffer) && !gPending: // T - open new buffer (duplicate current page)
 			openNewBuffer(url, doc, currentHTML)
 			redraw()
 
-		case buf[0] == 'w': // toggle wide mode (80 chars vs full width)
+		case key(buf[0], kb.ToggleWideMode): // toggle wide mode (80 chars vs full width)
 			wideMode = !wideMode
 			renderer = document.NewRendererWide(canvas, wideMode)
 			contentHeight = renderer.ContentHeight(doc)
@@ -1572,7 +1632,7 @@ func run(url string) error {
 			}
 			redraw()
 
-		case buf[0] == 's': // structure inspector
+		case key(buf[0], kb.StructureInspector): // structure inspector
 			if currentHTML != "" {
 				var err error
 				structureViewer, err = inspector.NewViewer(currentHTML, canvas)
@@ -1582,7 +1642,7 @@ func run(url string) error {
 				}
 			}
 
-		case buf[0] == 'b': // back in history (within current buffer)
+		case key(buf[0], kb.Back): // back in history (within current buffer)
 			buf := getCurrentBuffer()
 			if len(buf.history) > 0 {
 				// Save current to forward
@@ -1604,21 +1664,16 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == 'H': // home
+		case key(buf[0], kb.Home): // home
 			homeDoc, err := landingPage(favStore)
 			if err == nil {
 				navigateTo("browse://home", homeDoc, "")
 				redraw()
 			}
 
-		case buf[0] == 'r': // reload with browser (JS rendering)
+		case key(buf[0], kb.ReloadWithJs): // reload with browser (JS rendering)
 			if url != "" && url != "browse://home" {
-				// Show loading status
-				canvas.Clear()
-				canvas.WriteString(width/2-12, height/2, "Loading (JS)...", render.Style{Bold: true})
-				canvas.RenderTo(os.Stdout)
-
-				newDoc, err := fetchWithBrowserQuiet(url)
+				newDoc, err := fetchBrowserWithSpinner(canvas, url)
 				if err == nil {
 					doc = newDoc
 					contentHeight = renderer.ContentHeight(doc)
@@ -1631,23 +1686,17 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == 'R': // Generate AI rules for current site
+		case key(buf[0], kb.GenerateRules): // Generate AI rules for current site
 			if url != "" && url != "browse://home" && llmClient.Available() {
 				domain := getDomain(url)
-
-				// Show generating status
-				canvas.Clear()
 				providerName := "AI"
 				if p := llmClient.Provider(); p != nil {
 					providerName = p.Name()
 				}
-				canvas.WriteString(width/2-18, height/2-1, "Generating template with "+providerName+"...", render.Style{Bold: true})
-				canvas.WriteString(width/2-12, height/2+1, "(v2 template system)", render.Style{Dim: true})
-				canvas.RenderTo(os.Stdout)
 
 				// Fetch fresh HTML if we don't have it
 				if currentHTML == "" {
-					_, htmlContent, err := fetchQuietWithHTML(url)
+					_, htmlContent, err := fetchWithSpinner(canvas, url, ruleCache)
 					if err == nil {
 						currentHTML = htmlContent
 					}
@@ -1658,10 +1707,8 @@ func run(url string) error {
 					var rule *rules.Rule
 					var useV2 bool
 
-					// Try v2 template system first
-					ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-					rule, err := ruleGeneratorV2.GeneratePageType(ctx, domain, url, currentHTML)
-					cancel()
+					// Try v2 template system first with spinner
+					rule, err := generateRulesWithSpinner(canvas, ruleGeneratorV2, domain, url, currentHTML, providerName)
 
 					if err == nil && rule != nil {
 						// Apply v2 rules
@@ -1673,13 +1720,7 @@ func run(url string) error {
 
 					// Fall back to v1 if v2 didn't work
 					if newDoc == nil {
-						canvas.Clear()
-						canvas.WriteString(width/2-12, height/2, "Trying v1 fallback...", render.Style{Dim: true})
-						canvas.RenderTo(os.Stdout)
-
-						ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-						rule, err = ruleGeneratorV1.Generate(ctx, domain, currentHTML)
-						cancel()
+						rule, err = generateRulesV1WithSpinner(canvas, ruleGeneratorV1, domain, currentHTML, providerName)
 
 						if err == nil && rule != nil {
 							if result := rules.Apply(rule, currentHTML); result != nil {
@@ -1735,17 +1776,17 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == 'o': // open URL
+		case key(buf[0], kb.OpenUrl): // open URL
 			urlMode = true
 			urlInput = ""
 			redraw()
 
-		case buf[0] == '/': // search the web
+		case key(buf[0], kb.Search): // search the web
 			searchMode = true
 			searchInput = ""
 			redraw()
 
-		case buf[0] == 'y': // yank (copy) URL to clipboard
+		case key(buf[0], kb.CopyUrl): // yank (copy) URL to clipboard
 			if err := copyToClipboard(url); err == nil {
 				// Brief visual feedback - show "Copied!" in status area
 				canvas.Clear()
@@ -1758,7 +1799,7 @@ func run(url string) error {
 			}
 			redraw()
 
-		case buf[0] == 'E': // Edit in vim
+		case key(buf[0], kb.EditInEditor): // Edit in vim
 			// Render full document to get formatted content
 			fullHeight := contentHeight + 10
 			if fullHeight < height {
@@ -1831,47 +1872,114 @@ func run(url string) error {
 			}
 			redraw()
 
-		case buf[0] == 'j', buf[0] == 14:
+		case key(buf[0], kb.EditConfig): // Edit config in $EDITOR and hot-reload
+			configPath, err := config.ConfigPath()
+			if err != nil {
+				redraw()
+				continue
+			}
+
+			// Create config file with defaults if it doesn't exist
+			if _, err := os.Stat(configPath); os.IsNotExist(err) {
+				os.MkdirAll(filepath.Dir(configPath), 0755)
+				os.WriteFile(configPath, []byte(config.DefaultPkl()), 0644)
+			}
+
+			// Restore terminal for editor
+			term.RestoreMode()
+			render.ExitAltScreen(os.Stdout)
+
+			// Launch editor
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vim"
+			}
+			cmd := exec.Command(editor, configPath)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Run()
+
+			// Re-enter raw mode and alt screen
+			render.EnterAltScreen(os.Stdout)
+			term.EnterRawMode()
+
+			// Reload config
+			newCfg, err := config.Load()
+			if err != nil {
+				// Show error message
+				canvas.Clear()
+				canvas.WriteString(2, height/2-1, "Config Error:", render.Style{Bold: true})
+				errMsg := err.Error()
+				// Truncate if too long
+				if len(errMsg) > width-4 {
+					errMsg = errMsg[:width-7] + "..."
+				}
+				canvas.WriteString(2, height/2+1, errMsg, render.Style{})
+				canvas.WriteString(2, height/2+3, "Press any key to continue with previous config", render.Style{Dim: true})
+				canvas.RenderTo(os.Stdout)
+				// Wait for keypress
+				keyBuf := make([]byte, 1)
+				os.Stdin.Read(keyBuf)
+			} else {
+				// Apply new config
+				cfg = newCfg
+				// Apply display settings
+				if wideMode != cfg.Display.WideMode {
+					wideMode = cfg.Display.WideMode
+					renderer = document.NewRendererWide(canvas, wideMode)
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+				}
+				// Show success briefly
+				canvas.Clear()
+				canvas.WriteString(width/2-10, height/2, "Config reloaded!", render.Style{Bold: true})
+				canvas.RenderTo(os.Stdout)
+				time.Sleep(300 * time.Millisecond)
+			}
+			redraw()
+
+		case key(buf[0], kb.ScrollDown), buf[0] == 14: // j or Ctrl+N
 			scrollY++
 			if scrollY > maxScroll {
 				scrollY = maxScroll
 			}
 			redraw()
 
-		case buf[0] == 'k', buf[0] == 16:
+		case key(buf[0], kb.ScrollUp), buf[0] == 16: // k or Ctrl+P
 			scrollY--
 			if scrollY < 0 {
 				scrollY = 0
 			}
 			redraw()
 
-		case buf[0] == 'd', buf[0] == 4:
+		case key(buf[0], kb.HalfPageDown), buf[0] == 4: // d or Ctrl+D
 			scrollY += height / 2
 			if scrollY > maxScroll {
 				scrollY = maxScroll
 			}
 			redraw()
 
-		case buf[0] == 'u', buf[0] == 21:
+		case key(buf[0], kb.HalfPageUp), buf[0] == 21: // u or Ctrl+U
 			scrollY -= height / 2
 			if scrollY < 0 {
 				scrollY = 0
 			}
 			redraw()
 
-		case buf[0] == 'g':
-			if gPending {
-				// gg - go to top
-				gPending = false
-				scrollY = 0
-				redraw()
-			} else {
-				// Start g-prefix mode
-				gPending = true
-			}
+		case keyG(buf[0], kb.GoTop): // gg - go to top
+			gPending = false
+			scrollY = 0
+			redraw()
 
-		case buf[0] == 'T' && gPending:
-			// gT - previous buffer
+		case buf[0] == 'g' && !gPending:
+			// Start g-prefix mode
+			gPending = true
+
+		case keyG(buf[0], kb.PrevBuffer): // gT - previous buffer
 			gPending = false
 			if len(buffers) > 1 {
 				buffers[currentBufferIdx].current.scrollY = scrollY
@@ -1892,12 +2000,12 @@ func run(url string) error {
 				redraw()
 			}
 
-		case buf[0] == 'G':
+		case key(buf[0], kb.GoBottom):
 			gPending = false
 			scrollY = maxScroll
 			redraw()
 
-		case buf[0] == '[': // Previous paragraph
+		case key(buf[0], kb.PrevParagraph): // Previous paragraph
 			paragraphs := renderer.Paragraphs()
 			for i := len(paragraphs) - 1; i >= 0; i-- {
 				if paragraphs[i] < scrollY {
@@ -1910,7 +2018,7 @@ func run(url string) error {
 			}
 			redraw()
 
-		case buf[0] == ']': // Next paragraph
+		case key(buf[0], kb.NextParagraph): // Next paragraph
 			paragraphs := renderer.Paragraphs()
 			for _, p := range paragraphs {
 				if p > scrollY {
@@ -1923,7 +2031,7 @@ func run(url string) error {
 			}
 			redraw()
 
-		case buf[0] == '{': // Previous section (heading)
+		case key(buf[0], kb.PrevSection): // Previous section (heading)
 			headings := renderer.Headings()
 			for i := len(headings) - 1; i >= 0; i-- {
 				if headings[i].Y < scrollY {
@@ -1936,7 +2044,7 @@ func run(url string) error {
 			}
 			redraw()
 
-		case buf[0] == '}': // Next section (heading)
+		case key(buf[0], kb.NextSection): // Next section (heading)
 			headings := renderer.Headings()
 			for _, h := range headings {
 				if h.Y > scrollY {
@@ -1986,9 +2094,10 @@ func fetchAndParse(url string) (*html.Document, error) {
 		done <- true
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+	req.Header.Set("User-Agent", fetcher.UserAgent())
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: fetcher.Timeout()}
+	resp, err := client.Do(req)
 	if err != nil {
 		done <- true
 		return nil, fmt.Errorf("fetching %s: %w", url, err)
@@ -2029,9 +2138,10 @@ func fetchAndParseQuiet(url string) (*html.Document, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+	req.Header.Set("User-Agent", fetcher.UserAgent())
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: fetcher.Timeout()}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching %s: %w", url, err)
 	}
@@ -2066,9 +2176,10 @@ func fetchQuietWithHTML(targetURL string) (*html.Document, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+	req.Header.Set("User-Agent", fetcher.UserAgent())
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: fetcher.Timeout()}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
 	}
@@ -2094,9 +2205,10 @@ func fetchWithRules(targetURL string, cache *rules.Cache) (*html.Document, strin
 	if err != nil {
 		return nil, "", fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Browse/1.0 (Terminal Browser)")
+	req.Header.Set("User-Agent", fetcher.UserAgent())
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: fetcher.Timeout()}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
 	}
@@ -2333,6 +2445,7 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <strong>i</strong> - input field |
 <strong>r</strong> - reload with JS |
 <strong>R</strong> - generate AI rules |
+<strong>C</strong> - edit config |
 <strong>q</strong> - quit
 </p>
 ` + favouritesSection + `
@@ -2389,4 +2502,90 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 </html>`
 
 	return html.ParseString(page)
+}
+
+// withSpinner runs a function while showing an animated spinner.
+// The work function runs in a goroutine while the spinner animates.
+func withSpinner[T any](canvas *render.Canvas, message string, work func() T) T {
+	resultCh := make(chan T, 1)
+
+	go func() {
+		resultCh <- work()
+	}()
+
+	loader := render.NewLoadingDisplay(render.SpinnerWave, message)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case result := <-resultCh:
+			return result
+		case <-ticker.C:
+			loader.Tick()
+			canvas.Clear()
+			loader.DrawBox(canvas, "")
+			canvas.RenderTo(os.Stdout)
+		}
+	}
+}
+
+// fetchResult holds the result of a fetch operation.
+type fetchResult struct {
+	doc     *html.Document
+	content string
+	err     error
+}
+
+// fetchWithSpinner fetches a URL while showing an animated spinner.
+func fetchWithSpinner(canvas *render.Canvas, targetURL string, ruleCache *rules.Cache) (*html.Document, string, error) {
+	result := withSpinner(canvas, targetURL, func() fetchResult {
+		doc, content, err := fetchWithRules(targetURL, ruleCache)
+		return fetchResult{doc, content, err}
+	})
+	return result.doc, result.content, result.err
+}
+
+// browserResult holds the result of a browser fetch operation.
+type browserResult struct {
+	doc *html.Document
+	err error
+}
+
+// fetchBrowserWithSpinner fetches a URL using browser (JS) while showing spinner.
+func fetchBrowserWithSpinner(canvas *render.Canvas, targetURL string) (*html.Document, error) {
+	result := withSpinner(canvas, targetURL+" (JS)", func() browserResult {
+		doc, err := fetchWithBrowserQuiet(targetURL)
+		return browserResult{doc, err}
+	})
+	return result.doc, result.err
+}
+
+// ruleGenResult holds the result of AI rule generation.
+type ruleGenResult struct {
+	rule *rules.Rule
+	err  error
+}
+
+// generateRulesWithSpinner generates AI rules (v2) while showing spinner.
+func generateRulesWithSpinner(canvas *render.Canvas, generator *rules.GeneratorV2, domain, targetURL, htmlContent, providerName string) (*rules.Rule, error) {
+	result := withSpinner(canvas, "Generating template with "+providerName+"...", func() ruleGenResult {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		rule, err := generator.GeneratePageType(ctx, domain, targetURL, htmlContent)
+		return ruleGenResult{rule, err}
+	})
+	return result.rule, result.err
+}
+
+// generateRulesV1WithSpinner generates AI rules (v1 fallback) while showing spinner.
+func generateRulesV1WithSpinner(canvas *render.Canvas, generator *rules.Generator, domain, htmlContent, providerName string) (*rules.Rule, error) {
+	result := withSpinner(canvas, "Trying v1 fallback with "+providerName+"...", func() ruleGenResult {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		rule, err := generator.Generate(ctx, domain, htmlContent)
+		return ruleGenResult{rule, err}
+	})
+	return result.rule, result.err
 }
