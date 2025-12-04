@@ -113,6 +113,11 @@ func runPrint(url string) error {
 		TablesEnabled: cfg.Rendering.TablesEnabled,
 	})
 
+	// Configure document rendering options
+	document.Configure(document.Options{
+		MaxContentWidth: cfg.Rendering.DefaultWidth,
+	})
+
 	// Load favourites for landing page
 	favStore, _ := favourites.Load()
 
@@ -162,6 +167,11 @@ func run(url string) error {
 	html.Configure(html.Options{
 		LatexEnabled:  cfg.Rendering.LatexEnabled,
 		TablesEnabled: cfg.Rendering.TablesEnabled,
+	})
+
+	// Configure document rendering options
+	document.Configure(document.Options{
+		MaxContentWidth: cfg.Rendering.DefaultWidth,
 	})
 
 	// Load favourites early so landing page can show them
@@ -1924,16 +1934,30 @@ func run(url string) error {
 			} else {
 				// Apply new config
 				cfg = newCfg
-				// Apply display settings
-				if wideMode != cfg.Display.WideMode {
-					wideMode = cfg.Display.WideMode
-					renderer = document.NewRendererWide(canvas, wideMode)
-					contentHeight = renderer.ContentHeight(doc)
-					maxScroll = contentHeight - height
-					if maxScroll < 0 {
-						maxScroll = 0
-					}
+
+				// Re-apply all package configurations
+				fetcher.Configure(fetcher.Options{
+					UserAgent:      cfg.Fetcher.UserAgent,
+					TimeoutSeconds: cfg.Fetcher.TimeoutSeconds,
+					ChromePath:     cfg.Fetcher.ChromePath,
+				})
+				html.Configure(html.Options{
+					LatexEnabled:  cfg.Rendering.LatexEnabled,
+					TablesEnabled: cfg.Rendering.TablesEnabled,
+				})
+				document.Configure(document.Options{
+					MaxContentWidth: cfg.Rendering.DefaultWidth,
+				})
+
+				// Apply display settings and recreate renderer
+				wideMode = cfg.Display.WideMode
+				renderer = document.NewRendererWide(canvas, wideMode)
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
 				}
+
 				// Show success briefly
 				canvas.Clear()
 				canvas.WriteString(width/2-10, height/2, "Config reloaded!", render.Style{Bold: true})

@@ -9,7 +9,31 @@ import (
 	"browse/render"
 )
 
-const maxContentWidth = 80
+// Options holds configuration for the document renderer.
+type Options struct {
+	MaxContentWidth int
+}
+
+// DefaultOptions returns the default document rendering options.
+func DefaultOptions() Options {
+	return Options{
+		MaxContentWidth: 80,
+	}
+}
+
+var opts = DefaultOptions()
+
+// Configure sets the document rendering options.
+func Configure(o Options) {
+	if o.MaxContentWidth > 0 {
+		opts.MaxContentWidth = o.MaxContentWidth
+	}
+}
+
+// MaxContentWidth returns the current max content width setting.
+func MaxContentWidth() int {
+	return opts.MaxContentWidth
+}
 
 // Link represents a clickable link in the document.
 type Link struct {
@@ -68,10 +92,10 @@ func NewRenderer(c *render.Canvas) *Renderer {
 func NewRendererWide(c *render.Canvas, wideMode bool) *Renderer {
 	canvasWidth := c.Width()
 
-	// Content width is capped at maxContentWidth unless in wide mode
+	// Content width is capped at MaxContentWidth unless in wide mode
 	contentWidth := canvasWidth - 4 // minimal margins
-	if !wideMode && contentWidth > maxContentWidth {
-		contentWidth = maxContentWidth
+	if !wideMode && contentWidth > opts.MaxContentWidth {
+		contentWidth = opts.MaxContentWidth
 	}
 
 	// Center the content
