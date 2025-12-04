@@ -270,7 +270,7 @@ func (r *Renderer) renderHeading1(n *html.Node) {
 	r.writeLine(r.leftMargin-sectionNumWidth, r.y, paddedNum, render.Style{Dim: true})
 	r.writeLine(r.leftMargin, r.y, displayText, render.Style{Bold: true})
 
-	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
+	if href != "" {
 		r.links = append(r.links, Link{
 			Href:   href,
 			Text:   displayText,
@@ -314,7 +314,7 @@ func (r *Renderer) renderHeading2(n *html.Node) {
 	r.writeLine(r.leftMargin-sectionNumWidth, r.y, paddedNum, render.Style{Dim: true})
 	r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true})
 
-	if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
+	if href != "" {
 		r.links = append(r.links, Link{
 			Href:   href,
 			Text:   text,
@@ -362,29 +362,20 @@ func (r *Renderer) renderHeading3(n *html.Node) {
 		paddedNum := fmt.Sprintf("%*s  ", sectionNumWidth-2, sectionNum)
 		r.writeLine(r.leftMargin-sectionNumWidth, r.y, paddedNum, render.Style{Dim: true})
 		r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true, Underline: true})
-
-		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
-			r.links = append(r.links, Link{
-				Href:   href,
-				Text:   text,
-				X:      r.leftMargin,
-				Y:      r.y,
-				Length: render.StringWidth(text),
-			})
-		}
 	} else {
 		// No section number - just render title
 		r.writeLine(r.leftMargin, r.y, text, render.Style{Bold: true, Underline: true})
+	}
 
-		if href != "" && r.y >= 0 && r.y < r.canvas.Height() {
-			r.links = append(r.links, Link{
-				Href:   href,
-				Text:   text,
-				X:      r.leftMargin,
-				Y:      r.y,
-				Length: render.StringWidth(text),
-			})
-		}
+	// Track links ALWAYS (for link index) - no visibility check
+	if href != "" {
+		r.links = append(r.links, Link{
+			Href:   href,
+			Text:   text,
+			X:      r.leftMargin,
+			Y:      r.y,
+			Length: render.StringWidth(text),
+		})
 	}
 
 	r.y += 2
@@ -412,36 +403,32 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 		var currentLink *Link // Track current link being built
 
 		for _, span := range line {
+			// Render to canvas only if visible
 			if r.y >= 0 && r.y < r.canvas.Height() {
 				r.canvas.WriteString(x, r.y, span.Text, span.Style)
+			}
 
-				// Track links - consolidate consecutive spans with same href
-				if span.Href != "" {
-					if currentLink != nil && currentLink.Href == span.Href {
-						// Extend current link (include any gap from justification)
-						currentLink.Text += span.Text
-						currentLink.Length = x + render.StringWidth(span.Text) - currentLink.X
-					} else {
-						// Start new link
-						link := Link{
-							Href:   span.Href,
-							Text:   span.Text,
-							X:      x,
-							Y:      r.y,
-							Length: render.StringWidth(span.Text),
-						}
-						r.links = append(r.links, link)
-						currentLink = &r.links[len(r.links)-1]
-					}
+			// Track links ALWAYS (for link index), consolidating consecutive spans
+			if span.Href != "" {
+				if currentLink != nil && currentLink.Href == span.Href {
+					// Extend current link (include any gap from justification)
+					currentLink.Text += span.Text
+					currentLink.Length = x + render.StringWidth(span.Text) - currentLink.X
 				} else {
-					// Non-link span - keep currentLink if we're inside a link
-					// (justification spaces between link words)
-					if currentLink != nil {
-						// Check if next span continues the same link
-						// For now, keep currentLink active to catch the next span
+					// Start new link
+					link := Link{
+						Href:   span.Href,
+						Text:   span.Text,
+						X:      x,
+						Y:      r.y,
+						Length: render.StringWidth(span.Text),
 					}
+					r.links = append(r.links, link)
+					currentLink = &r.links[len(r.links)-1]
 				}
 			}
+			// Non-link spans: keep currentLink active to catch next span with same href
+
 			x += render.StringWidth(span.Text)
 		}
 		r.y++

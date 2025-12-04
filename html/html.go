@@ -322,6 +322,10 @@ func extractContentOnly(n *html.Node, parent *Node) {
 				// Skip navigation elements (already extracted)
 				continue
 
+			case "style", "script", "noscript", "template":
+				// Skip non-content elements (CSS, JS, etc.)
+				continue
+
 			case "article":
 				// Add a separator before each article (except first)
 				if len(parent.Children) > 0 {
@@ -339,6 +343,10 @@ func extractContentOnly(n *html.Node, parent *Node) {
 
 			case "main", "section", "div", "span",
 				"center", "nobr", "tbody", "b", "i", "u", "font":
+				// Skip elements with role="navigation" (semantic navigation markers)
+				if getAttr(c, "role") == "navigation" {
+					continue
+				}
 				extractContentOnly(c, parent)
 
 			case "tr":
@@ -452,6 +460,11 @@ func extractNavLinks(n *html.Node) *Node {
 
 // extractTable extracts content from a table element.
 func extractTable(n *html.Node, parent *Node) {
+	// Skip navigation tables (Wikipedia navboxes, etc.)
+	if isNavigationTable(n) {
+		return
+	}
+
 	// Check if this looks like a HN-style table with "athing" class rows
 	if isHNStyleTable(n) {
 		extractHNTable(n, parent)
@@ -635,6 +648,12 @@ func extractCellContent(n *html.Node, cell *Node) {
 			Text: text,
 		})
 	}
+}
+
+// isNavigationTable checks if a table is a navigation element (not content).
+func isNavigationTable(n *html.Node) bool {
+	// Tables with role="navigation" are navigation, not content
+	return getAttr(n, "role") == "navigation"
 }
 
 // isHNStyleTable checks if a table contains HN-style "athing" rows.
@@ -930,6 +949,10 @@ func extractInline(n *html.Node, parent *Node) {
 			case "code":
 				parent.Children = append(parent.Children, &Node{Type: NodeCode, Text: textContent(c)})
 
+			case "style", "script", "noscript", "template":
+				// Skip non-content elements
+				continue
+
 			default:
 				extractInline(c, parent)
 			}
@@ -943,6 +966,13 @@ func textContent(n *html.Node) string {
 	extract = func(n *html.Node) {
 		if n.Type == html.TextNode {
 			sb.WriteString(n.Data)
+		}
+		// Skip non-content elements
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "style", "script", "noscript", "template":
+				return // Don't extract text from these elements
+			}
 		}
 		// Handle MathML <math> elements - extract annotation with LaTeX
 		if latexEnabled() && n.Type == html.ElementNode && n.Data == "math" {
