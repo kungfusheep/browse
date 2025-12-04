@@ -202,6 +202,12 @@ func styleSequence(s Style) string {
 	if s.FgColor > 0 {
 		codes = append(codes, fmt.Sprintf("%d", s.FgColor))
 	}
+	if s.UseBgRGB {
+		// True color: 48;2;R;G;B
+		codes = append(codes, fmt.Sprintf("48;2;%d;%d;%d", s.BgRGB[0], s.BgRGB[1], s.BgRGB[2]))
+	} else if s.BgColor > 0 {
+		codes = append(codes, fmt.Sprintf("%d", s.BgColor))
+	}
 	return fmt.Sprintf("\033[%sm", strings.Join(codes, ";"))
 }
 

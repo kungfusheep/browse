@@ -41,6 +41,11 @@ type Rendering struct {
 	TablesEnabled bool `json:"tablesEnabled"`
 }
 
+// Session settings
+type Session struct {
+	RestoreSession bool `json:"restoreSession"`
+}
+
 // Keybindings configuration
 type Keybindings struct {
 	// Navigation
@@ -57,9 +62,9 @@ type Keybindings struct {
 	NextSection   string `json:"nextSection"`
 
 	// Actions
-	OpenUrl      string `json:"openUrl"`
-	Search       string `json:"search"`
-	CopyUrl      string `json:"copyUrl"`
+	OpenUrl string `json:"openUrl"`
+	Find    string `json:"find"` // find in page
+	CopyUrl string `json:"copyUrl"`
 	EditInEditor string `json:"editInEditor"`
 	FollowLink   string `json:"followLink"`
 
@@ -80,6 +85,9 @@ type Keybindings struct {
 	AddFavourite   string `json:"addFavourite"`
 	FavouritesList string `json:"favouritesList"`
 
+	// Omnibox (unified URL + search)
+	Omnibox string `json:"omnibox"`
+
 	// Other
 	Home               string `json:"home"`
 	StructureInspector string `json:"structureInspector"`
@@ -96,6 +104,7 @@ type Config struct {
 	Search      Search      `json:"search"`
 	Fetcher     Fetcher     `json:"fetcher"`
 	Rendering   Rendering   `json:"rendering"`
+	Session     Session     `json:"session"`
 	Keybindings Keybindings `json:"keybindings"`
 }
 
@@ -120,6 +129,9 @@ func Default() *Config {
 			LatexEnabled:  true,
 			TablesEnabled: true,
 		},
+		Session: Session{
+			RestoreSession: true,
+		},
 		Keybindings: Keybindings{
 			Quit:               "q",
 			ScrollDown:         "j",
@@ -132,22 +144,23 @@ func Default() *Config {
 			NextParagraph:      "]",
 			PrevSection:        "{",
 			NextSection:        "}",
-			OpenUrl:            "o",
-			Search:             "/",
-			CopyUrl:            "y",
+			OpenUrl: "o",
+			Find:    "/",
+			CopyUrl: "y",
 			EditInEditor:       "E",
 			FollowLink:         "f",
 			TableOfContents:    "t",
 			SiteNavigation:     "n",
 			LinkIndex:          "l",
-			Back:               "b",
-			Forward:            "B",
+			Back:               "\x0f", // Ctrl-o (vim jump list style)
+			Forward:            "\t",   // Ctrl-i / Tab (vim jump list style)
 			NewBuffer:          "T",
 			NextBuffer:         "gt",
 			PrevBuffer:         "gT",
 			BufferList:         "`",
 			AddFavourite:       "M",
 			FavouritesList:     "'",
+			Omnibox:            "\x0c", // Ctrl-l (browser-style address bar)
 			Home:               "H",
 			StructureInspector: "s",
 			ToggleWideMode:     "w",
@@ -282,7 +295,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.PrevSection, user.Keybindings.PrevSection)
 	mergeKeybinding(&result.Keybindings.NextSection, user.Keybindings.NextSection)
 	mergeKeybinding(&result.Keybindings.OpenUrl, user.Keybindings.OpenUrl)
-	mergeKeybinding(&result.Keybindings.Search, user.Keybindings.Search)
+	mergeKeybinding(&result.Keybindings.Find, user.Keybindings.Find)
 	mergeKeybinding(&result.Keybindings.CopyUrl, user.Keybindings.CopyUrl)
 	mergeKeybinding(&result.Keybindings.EditInEditor, user.Keybindings.EditInEditor)
 	mergeKeybinding(&result.Keybindings.FollowLink, user.Keybindings.FollowLink)
@@ -297,6 +310,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.BufferList, user.Keybindings.BufferList)
 	mergeKeybinding(&result.Keybindings.AddFavourite, user.Keybindings.AddFavourite)
 	mergeKeybinding(&result.Keybindings.FavouritesList, user.Keybindings.FavouritesList)
+	mergeKeybinding(&result.Keybindings.Omnibox, user.Keybindings.Omnibox)
 	mergeKeybinding(&result.Keybindings.Home, user.Keybindings.Home)
 	mergeKeybinding(&result.Keybindings.StructureInspector, user.Keybindings.StructureInspector)
 	mergeKeybinding(&result.Keybindings.ToggleWideMode, user.Keybindings.ToggleWideMode)
@@ -380,7 +394,7 @@ keybindings = new {
 
   // Actions
   openUrl = "o"
-  search = "/"
+  find = "/"      // find in page
   copyUrl = "y"
   editInEditor = "E"
   followLink = "f"

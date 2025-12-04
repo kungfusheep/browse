@@ -23,9 +23,11 @@ import (
 	"browse/html"
 	"browse/inspector"
 	"browse/llm"
+	"browse/omnibox"
 	"browse/render"
 	"browse/rules"
 	"browse/search"
+	"browse/session"
 )
 
 func main() {
@@ -177,18 +179,6 @@ func run(url string) error {
 	// Load favourites early so landing page can show them
 	favStore, _ := favourites.Load()
 
-	if url == "" {
-		// Show landing page
-		doc, err = landingPage(favStore)
-		url = "browse://home"
-	} else {
-		// Fetch the page
-		doc, err = fetchAndParse(url)
-	}
-	if err != nil {
-		return err
-	}
-
 	// Set up terminal
 	width, height, err := render.TerminalSize()
 	if err != nil {
@@ -243,11 +233,75 @@ func run(url string) error {
 		forward []pageState // forward history stack (after going back)
 	}
 
-	// Initialize with single buffer containing the starting page
-	buffers := []buffer{{
-		current: pageState{url: url, doc: doc, scrollY: 0, html: currentHTML},
-	}}
+	var buffers []buffer
 	currentBufferIdx := 0
+
+	// Try to restore session if enabled and no URL provided
+	sessionRestored := false
+	if cfg.Session.RestoreSession && url == "" {
+		if savedSession, err := session.Load(); err == nil && len(savedSession.Buffers) > 0 {
+			// Restore buffers from session
+			for _, sb := range savedSession.Buffers {
+				var pageDoc *html.Document
+				pageURL := sb.Current.URL
+				if pageURL == "browse://home" {
+					pageDoc, _ = landingPage(favStore)
+				} else {
+					pageDoc, _ = fetchAndParse(pageURL)
+				}
+				if pageDoc != nil {
+					b := buffer{
+						current: pageState{url: pageURL, doc: pageDoc, scrollY: sb.Current.ScrollY},
+					}
+					// Restore back history (docs will be fetched on demand)
+					for _, h := range sb.History {
+						b.history = append(b.history, pageState{
+							url:     h.URL,
+							scrollY: h.ScrollY,
+							doc:     nil, // fetched when navigating back
+						})
+					}
+					// Restore forward history
+					for _, f := range sb.Forward {
+						b.forward = append(b.forward, pageState{
+							url:     f.URL,
+							scrollY: f.ScrollY,
+							doc:     nil, // fetched when navigating forward
+						})
+					}
+					buffers = append(buffers, b)
+				}
+			}
+			if len(buffers) > 0 {
+				currentBufferIdx = savedSession.CurrentBufferIdx
+				if currentBufferIdx >= len(buffers) {
+					currentBufferIdx = 0
+				}
+				sessionRestored = true
+			}
+		}
+	}
+
+	// If session wasn't restored, start fresh
+	if !sessionRestored {
+		if url == "" {
+			doc, err = landingPage(favStore)
+			url = "browse://home"
+		} else {
+			doc, err = fetchAndParse(url)
+		}
+		if err != nil {
+			return err
+		}
+		buffers = []buffer{{
+			current: pageState{url: url, doc: doc, scrollY: 0, html: currentHTML},
+		}}
+	}
+
+	// Set initial state from current buffer
+	url = buffers[currentBufferIdx].current.url
+	doc = buffers[currentBufferIdx].current.doc
+	scrollY := buffers[currentBufferIdx].current.scrollY
 
 	// Helper to get current buffer
 	getCurrentBuffer := func() *buffer {
@@ -266,7 +320,18 @@ func run(url string) error {
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-	scrollY := 0
+
+	// Handle initial URL hash/anchor if present
+	if hash := extractHash(url); hash != "" {
+		if anchorY, found := document.FindAnchorY(doc, hash, renderer.ContentWidth()); found {
+			scrollY = anchorY
+			if scrollY > maxScroll {
+				scrollY = maxScroll
+			}
+			getCurrentBuffer().current.scrollY = scrollY
+		}
+	}
+
 	jumpMode := false
 	inputMode := false       // selecting an input field
 	textEntry := false       // entering text into a field
@@ -278,7 +343,11 @@ func run(url string) error {
 	bufferMode := false      // showing buffer list overlay
 	bufferScrollOffset := 0  // scroll position within buffer list
 	urlMode := false         // entering a URL
-	searchMode := false      // entering a search query
+	omniMode := false        // omnibox mode (unified URL + search)
+	findMode := false                  // find in page mode
+	findInput := ""                    // current find query
+	findMatches := []document.Match{}  // match positions (from simple doc walker)
+	findCurrentIdx := 0                // current match index
 	loading := false         // currently loading a page
 	structureMode := false   // showing DOM structure inspector
 	jumpInput := ""
@@ -299,9 +368,9 @@ func run(url string) error {
 	var activeInput *document.Input             // currently selected input
 	var enteredText string                      // text being entered
 	var urlInput string                         // URL being entered
-	var searchInput string                      // search query being entered
-	var structureViewer *inspector.Viewer       // DOM structure viewer
-	searchProvider := search.ProviderByName(cfg.Search.DefaultProvider) // web search provider
+	var omniInput string                        // omnibox input being entered
+	var structureViewer *inspector.Viewer // DOM structure viewer
+	omniParser := omnibox.NewParser()     // omnibox input parser
 
 	// Favourites mode state (favStore loaded at start of run())
 	favouritesMode := false      // showing favourites overlay
@@ -401,6 +470,18 @@ func run(url string) error {
 			return
 		}
 
+		// Find matches using simple document walker (single source of truth)
+		findMatches = document.FindMatches(doc, findInput, renderer.ContentWidth())
+
+		// Clamp findCurrentIdx if out of bounds
+		if len(findMatches) == 0 {
+			findCurrentIdx = 0
+		} else if findCurrentIdx >= len(findMatches) {
+			findCurrentIdx = len(findMatches) - 1
+		}
+
+		// Set find highlighting and render
+		renderer.SetFindQuery(findInput, findCurrentIdx)
 		renderer.Render(doc, scrollY)
 
 		// Draw subtle status bar at bottom with current domain
@@ -766,14 +847,29 @@ func run(url string) error {
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
-		if searchMode {
+		if findMode {
+			// Draw find bar at bottom of screen
+			findBarY := height - 1
+			canvas.DrawHLine(0, findBarY, width, ' ', render.Style{Reverse: true})
+			prompt := "/" + findInput + "█"
+			canvas.WriteString(0, findBarY, prompt, render.Style{Reverse: true})
+
+			// Show match count
+			if len(findMatches) > 0 {
+				matchInfo := fmt.Sprintf(" [%d/%d] ", findCurrentIdx+1, len(findMatches))
+				canvas.WriteString(len(prompt)+1, findBarY, matchInfo, render.Style{Reverse: true, Bold: true})
+			} else if findInput != "" {
+				canvas.WriteString(len(prompt)+1, findBarY, " [no matches] ", render.Style{Reverse: true, Dim: true})
+			}
+		}
+		if omniMode {
 			canvas.DimAll()
-			// Draw search input as centered overlay box
-			boxWidth := 60
+			// Draw omnibox as centered overlay
+			boxWidth := 70
 			if boxWidth > width-4 {
 				boxWidth = width - 4
 			}
-			boxHeight := 5
+			boxHeight := 7
 			startX := (width - boxWidth) / 2
 			startY := (height - boxHeight) / 2
 
@@ -788,21 +884,28 @@ func run(url string) error {
 			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
 
 			// Title
-			title := fmt.Sprintf(" Search (%s) ", searchProvider.Name())
+			title := " Omnibox "
 			titleX := startX + (boxWidth-len(title))/2
 			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
 
-			// Search input field
+			// Input field
 			inputY := startY + 2
-			maxQueryWidth := boxWidth - 4
-			displayQuery := searchInput
-			if len(displayQuery) > maxQueryWidth-1 {
-				displayQuery = displayQuery[len(displayQuery)-maxQueryWidth+1:]
+			maxInputWidth := boxWidth - 4
+			displayInput := omniInput
+			if len(displayInput) > maxInputWidth-1 {
+				displayInput = displayInput[len(displayInput)-maxInputWidth+1:]
 			}
-			canvas.WriteString(startX+2, inputY, displayQuery+"█", render.Style{})
+			canvas.WriteString(startX+2, inputY, displayInput+"█", render.Style{})
+
+			// Prefix hints
+			prefixHint := "wp <query>  ddg <query>"
+			if len(prefixHint) > boxWidth-4 {
+				prefixHint = prefixHint[:boxWidth-7] + "..."
+			}
+			canvas.WriteString(startX+2, inputY+2, prefixHint, render.Style{Dim: true})
 
 			// Hint
-			hint := " Enter to search, ESC to cancel "
+			hint := " URL, prefix:query, or search term "
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
@@ -849,11 +952,34 @@ func run(url string) error {
 						jumpInput = ""
 
 						newURL := resolveURL(url, links[i].Href)
-						loading = true
-						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
-						loading = false
-						if err == nil {
-							navigateTo(newURL, newDoc, htmlContent)
+						// Check if this is a same-page anchor link
+						if isSamePageLink(url, newURL) {
+							hash := extractHash(newURL)
+							if hash != "" {
+								if anchorY, found := document.FindAnchorY(doc, hash, renderer.ContentWidth()); found {
+									scrollY = anchorY
+									if scrollY > maxScroll {
+										scrollY = maxScroll
+									}
+								}
+							}
+						} else {
+							loading = true
+							newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
+							loading = false
+							if err == nil {
+								navigateTo(newURL, newDoc, htmlContent)
+								// After navigating, check for hash and scroll to anchor
+								if hash := extractHash(newURL); hash != "" {
+									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+										scrollY = anchorY
+										if scrollY > maxScroll {
+											scrollY = maxScroll
+										}
+										getCurrentBuffer().current.scrollY = scrollY
+									}
+								}
+							}
 						}
 						redraw()
 						break
@@ -1070,11 +1196,34 @@ func run(url string) error {
 						navScrollOffset = 0
 
 						newURL := resolveURL(url, navLinks[actualIdx].Href)
-						loading = true
-						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
-						loading = false
-						if err == nil {
-							navigateTo(newURL, newDoc, htmlContent)
+						// Check if this is a same-page anchor link
+						if isSamePageLink(url, newURL) {
+							hash := extractHash(newURL)
+							if hash != "" {
+								if anchorY, found := document.FindAnchorY(doc, hash, renderer.ContentWidth()); found {
+									scrollY = anchorY
+									if scrollY > maxScroll {
+										scrollY = maxScroll
+									}
+								}
+							}
+						} else {
+							loading = true
+							newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
+							loading = false
+							if err == nil {
+								navigateTo(newURL, newDoc, htmlContent)
+								// After navigating, check for hash and scroll to anchor
+								if hash := extractHash(newURL); hash != "" {
+									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+										scrollY = anchorY
+										if scrollY > maxScroll {
+											scrollY = maxScroll
+										}
+										getCurrentBuffer().current.scrollY = scrollY
+									}
+								}
+							}
 						}
 						redraw()
 						break
@@ -1144,11 +1293,34 @@ func run(url string) error {
 						linkScrollOffset = 0
 
 						newURL := resolveURL(url, links[actualIdx].Href)
-						loading = true
-						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
-						loading = false
-						if err == nil {
-							navigateTo(newURL, newDoc, htmlContent)
+						// Check if this is a same-page anchor link
+						if isSamePageLink(url, newURL) {
+							hash := extractHash(newURL)
+							if hash != "" {
+								if anchorY, found := document.FindAnchorY(doc, hash, renderer.ContentWidth()); found {
+									scrollY = anchorY
+									if scrollY > maxScroll {
+										scrollY = maxScroll
+									}
+								}
+							}
+						} else {
+							loading = true
+							newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
+							loading = false
+							if err == nil {
+								navigateTo(newURL, newDoc, htmlContent)
+								// After navigating, check for hash and scroll to anchor
+								if hash := extractHash(newURL); hash != "" {
+									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+										scrollY = anchorY
+										if scrollY > maxScroll {
+											scrollY = maxScroll
+										}
+										getCurrentBuffer().current.scrollY = scrollY
+									}
+								}
+							}
 						}
 						redraw()
 						break
@@ -1366,6 +1538,16 @@ func run(url string) error {
 							loading = false
 							if err == nil {
 								navigateTo(fav.URL, newDoc, rawHTML)
+								// Handle hash/anchor in URL
+								if hash := extractHash(fav.URL); hash != "" {
+									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+										scrollY = anchorY
+										if scrollY > maxScroll {
+											scrollY = maxScroll
+										}
+										getCurrentBuffer().current.scrollY = scrollY
+									}
+								}
 							}
 							redraw()
 						}
@@ -1415,6 +1597,16 @@ func run(url string) error {
 					loading = false
 					if err == nil {
 						navigateTo(targetURL, newDoc, htmlContent)
+						// Handle hash/anchor in URL
+						if hash := extractHash(targetURL); hash != "" {
+							if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+								scrollY = anchorY
+								if scrollY > maxScroll {
+									scrollY = maxScroll
+								}
+								getCurrentBuffer().current.scrollY = scrollY
+							}
+						}
 					}
 					redraw()
 				}
@@ -1432,42 +1624,111 @@ func run(url string) error {
 			continue
 		}
 
-		// Search mode input handling
-		if searchMode {
+		// Find in page mode input handling
+		if findMode {
 			switch {
-			case buf[0] == 27: // Escape - cancel search mode
-				searchMode = false
-				searchInput = ""
+			case buf[0] == 27: // Escape - cancel find mode
+				findMode = false
+				findInput = ""
+				findMatches = nil
+				findCurrentIdx = 0
 				redraw()
 
-			case buf[0] == 13 || buf[0] == 10: // Enter - execute search
-				if searchInput != "" {
-					searchMode = false
-					query := searchInput
-					searchInput = ""
-					loading = true
+			case buf[0] == 13 || buf[0] == 10: // Enter - close input, keep highlights
+				findMode = false
+				// Don't clear findInput - keep it for n/N navigation
+				redraw()
 
-					results, err := searchWithSpinner(canvas, searchProvider, query)
-					loading = false
-					if err == nil && results != nil {
-						// Convert results to HTML and parse as document
-						htmlContent := results.ToHTML()
-						newDoc, parseErr := html.ParseString(htmlContent)
-						if parseErr == nil {
-							navigateTo("search://"+query, newDoc, htmlContent)
+			case buf[0] == 127 || buf[0] == 8: // Backspace
+				if len(findInput) > 0 {
+					findInput = findInput[:len(findInput)-1]
+					findCurrentIdx = 0 // Reset to first match when query changes
+					redraw()           // Matches updated via renderer
+				}
+
+			case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
+				findInput += string(buf[0])
+				findCurrentIdx = 0 // Reset to first match when query changes
+				redraw()           // First render to get match positions
+
+				// Auto-scroll to first match (centered in viewport)
+				if len(findMatches) > 0 {
+					newScrollY := findMatches[findCurrentIdx].Y - height/2
+					if newScrollY < 0 {
+						newScrollY = 0
+					}
+					if newScrollY > maxScroll {
+						newScrollY = maxScroll
+					}
+					if newScrollY != scrollY {
+						scrollY = newScrollY
+						redraw() // Re-render at new scroll position
+					}
+				}
+			}
+			continue
+		}
+
+		// Omnibox mode input handling
+		if omniMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel omnibox mode
+				omniMode = false
+				omniInput = ""
+				redraw()
+
+			case buf[0] == 13 || buf[0] == 10: // Enter - process omnibox input
+				if omniInput != "" {
+					omniMode = false
+					input := omniInput
+					omniInput = ""
+
+					// Parse the input: URL, prefix:query, or plain search
+					result := omniParser.Parse(input)
+
+					if result.UseInternal {
+						// Use internal search provider
+						provider := search.ProviderByName(result.Provider)
+						loading = true
+						results, err := searchWithSpinner(canvas, provider, result.Query)
+						loading = false
+						if err == nil && results != nil {
+							htmlContent := results.ToHTML()
+							newDoc, parseErr := html.ParseString(htmlContent)
+							if parseErr == nil {
+								navigateTo(result.Provider+"://"+result.Query, newDoc, htmlContent)
+							}
+						}
+					} else if result.URL != "" {
+						// Direct URL or prefixed search URL
+						loading = true
+						newDoc, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
+						loading = false
+						if err == nil {
+							navigateTo(result.URL, newDoc, htmlContent)
+							// Handle hash/anchor in URL
+							if hash := extractHash(result.URL); hash != "" {
+								if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+									scrollY = anchorY
+									if scrollY > maxScroll {
+										scrollY = maxScroll
+									}
+									getCurrentBuffer().current.scrollY = scrollY
+								}
+							}
 						}
 					}
 					redraw()
 				}
 
 			case buf[0] == 127 || buf[0] == 8: // Backspace
-				if len(searchInput) > 0 {
-					searchInput = searchInput[:len(searchInput)-1]
+				if len(omniInput) > 0 {
+					omniInput = omniInput[:len(omniInput)-1]
 					redraw()
 				}
 
 			case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
-				searchInput += string(buf[0])
+				omniInput += string(buf[0])
 				redraw()
 			}
 			continue
@@ -1549,6 +1810,42 @@ func run(url string) error {
 		// Normal mode
 		switch {
 		case key(buf[0], kb.Quit):
+			// Save session before quitting
+			if cfg.Session.RestoreSession {
+				// Update current buffer's scroll position
+				buffers[currentBufferIdx].current.scrollY = scrollY
+
+				// Build session state with full history
+				var sessionBuffers []session.Buffer
+				for _, b := range buffers {
+					sb := session.Buffer{
+						Current: session.PageState{
+							URL:     b.current.url,
+							ScrollY: b.current.scrollY,
+						},
+					}
+					// Save back history
+					for _, h := range b.history {
+						sb.History = append(sb.History, session.PageState{
+							URL:     h.url,
+							ScrollY: h.scrollY,
+						})
+					}
+					// Save forward history
+					for _, f := range b.forward {
+						sb.Forward = append(sb.Forward, session.PageState{
+							URL:     f.url,
+							ScrollY: f.scrollY,
+						})
+					}
+					sessionBuffers = append(sessionBuffers, sb)
+				}
+				sess := &session.Session{
+					Buffers:          sessionBuffers,
+					CurrentBufferIdx: currentBufferIdx,
+				}
+				session.Save(sess) // Ignore errors on save
+			}
 			return nil
 
 		case key(buf[0], kb.FollowLink): // follow link - enter jump mode
@@ -1591,6 +1888,37 @@ func run(url string) error {
 				redraw()
 			}
 
+		case buf[0] == 'n' && findInput != "": // find next match (takes priority over SiteNavigation when find active)
+			if len(findMatches) > 0 {
+				findCurrentIdx = (findCurrentIdx + 1) % len(findMatches)
+				// Center match in viewport
+				scrollY = findMatches[findCurrentIdx].Y - height/2
+				if scrollY < 0 {
+					scrollY = 0
+				}
+				if scrollY > maxScroll {
+					scrollY = maxScroll
+				}
+				redraw()
+			}
+
+		case buf[0] == 'N' && findInput != "": // find previous match
+			if len(findMatches) > 0 {
+				findCurrentIdx--
+				if findCurrentIdx < 0 {
+					findCurrentIdx = len(findMatches) - 1
+				}
+				// Center match in viewport
+				scrollY = findMatches[findCurrentIdx].Y - height/2
+				if scrollY < 0 {
+					scrollY = 0
+				}
+				if scrollY > maxScroll {
+					scrollY = maxScroll
+				}
+				redraw()
+			}
+
 		case key(buf[0], kb.SiteNavigation): // navigation - show nav links overlay
 			if len(doc.Navigation) > 0 {
 				navMode = true
@@ -1615,6 +1943,14 @@ func run(url string) error {
 				// Pop from forward
 				buf.current = buf.forward[len(buf.forward)-1]
 				buf.forward = buf.forward[:len(buf.forward)-1]
+				// Fetch page if doc is nil (restored from session)
+				if buf.current.doc == nil {
+					if buf.current.url == "browse://home" {
+						buf.current.doc, _ = landingPage(favStore)
+					} else {
+						buf.current.doc, _ = fetchAndParse(buf.current.url)
+					}
+				}
 				// Update local state
 				doc = buf.current.doc
 				url = buf.current.url
@@ -1703,15 +2039,25 @@ func run(url string) error {
 				// Pop from history
 				buf.current = buf.history[len(buf.history)-1]
 				buf.history = buf.history[:len(buf.history)-1]
+				// Fetch page if doc is nil (restored from session)
+				if buf.current.doc == nil {
+					if buf.current.url == "browse://home" {
+						buf.current.doc, _ = landingPage(favStore)
+					} else {
+						buf.current.doc, _ = fetchAndParse(buf.current.url)
+					}
+				}
 				// Update local state
 				doc = buf.current.doc
 				url = buf.current.url
 				scrollY = buf.current.scrollY
 				currentHTML = buf.current.html
-				contentHeight = renderer.ContentHeight(doc)
-				maxScroll = contentHeight - height
-				if maxScroll < 0 {
-					maxScroll = 0
+				if doc != nil {
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
 				}
 				redraw()
 			}
@@ -1833,9 +2179,16 @@ func run(url string) error {
 			urlInput = ""
 			redraw()
 
-		case key(buf[0], kb.Search): // search the web
-			searchMode = true
-			searchInput = ""
+		case key(buf[0], kb.Find): // find in page
+			findMode = true
+			findInput = ""
+			findMatches = nil
+			findCurrentIdx = 0
+			redraw()
+
+		case key(buf[0], kb.Omnibox): // omnibox (unified URL + search)
+			omniMode = true
+			omniInput = ""
 			redraw()
 
 		case key(buf[0], kb.CopyUrl): // yank (copy) URL to clipboard
@@ -2000,8 +2353,7 @@ func run(url string) error {
 					maxScroll = 0
 				}
 
-				// Update search provider and keybindings
-				searchProvider = search.ProviderByName(cfg.Search.DefaultProvider)
+				// Update keybindings
 				kb = cfg.Keybindings
 
 				// Show success briefly
@@ -2446,6 +2798,15 @@ func showSpinner(done chan bool) {
 }
 
 func resolveURL(base, href string) string {
+	// Handle hash-only links (same page anchors)
+	if strings.HasPrefix(href, "#") {
+		// Strip any existing hash from base and append the new one
+		if idx := strings.Index(base, "#"); idx != -1 {
+			return base[:idx] + href
+		}
+		return base + href
+	}
+
 	// Handle absolute URLs
 	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
 		return href
@@ -2480,6 +2841,27 @@ func resolveURL(base, href string) string {
 		return base + "/" + href
 	}
 	return base[:lastSlash+1] + href
+}
+
+// urlWithoutHash returns the URL with any hash/fragment removed.
+func urlWithoutHash(u string) string {
+	if idx := strings.Index(u, "#"); idx != -1 {
+		return u[:idx]
+	}
+	return u
+}
+
+// extractHash returns the hash/fragment from a URL (without the # prefix).
+func extractHash(u string) string {
+	if idx := strings.Index(u, "#"); idx != -1 {
+		return u[idx+1:]
+	}
+	return ""
+}
+
+// isSamePageLink checks if targetURL is the same page as currentURL (just different anchor).
+func isSamePageLink(currentURL, targetURL string) bool {
+	return urlWithoutHash(currentURL) == urlWithoutHash(targetURL)
 }
 
 func copyToClipboard(text string) error {

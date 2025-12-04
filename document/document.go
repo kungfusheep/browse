@@ -61,6 +61,176 @@ type Heading struct {
 	Y      int    // line position in document
 }
 
+// Match represents a find-in-page match location.
+type Match struct {
+	Y int // absolute Y position in document
+}
+
+// FindMatches finds all occurrences of query in the document.
+// Returns a list of match positions for navigation.
+// This is separate from rendering - just walks the document structure.
+func FindMatches(doc *html.Document, query string, contentWidth int) []Match {
+	if query == "" || doc == nil {
+		return nil
+	}
+
+	queryLower := strings.ToLower(query)
+	var matches []Match
+	y := 0
+
+	// Count occurrences in a string
+	countIn := func(text string) int {
+		count := 0
+		textLower := strings.ToLower(text)
+		pos := 0
+		for {
+			idx := strings.Index(textLower[pos:], queryLower)
+			if idx == -1 {
+				break
+			}
+			count++
+			pos += idx + len(queryLower)
+		}
+		return count
+	}
+
+	// Walk document nodes
+	for _, node := range doc.Content.Children {
+		switch node.Type {
+		case html.NodeHeading1:
+			for i := 0; i < countIn(node.Text); i++ {
+				matches = append(matches, Match{Y: y})
+			}
+			y += 4
+
+		case html.NodeHeading2:
+			for i := 0; i < countIn(node.Text); i++ {
+				matches = append(matches, Match{Y: y})
+			}
+			y += 3
+
+		case html.NodeHeading3:
+			for i := 0; i < countIn(node.Text); i++ {
+				matches = append(matches, Match{Y: y})
+			}
+			y += 2
+
+		case html.NodeParagraph:
+			text := node.PlainText()
+			for i := 0; i < countIn(text); i++ {
+				matches = append(matches, Match{Y: y})
+			}
+			lines := render.WrapText(text, contentWidth)
+			y += len(lines) + 1
+
+		case html.NodeList:
+			for _, item := range node.Children {
+				text := item.PlainText()
+				for i := 0; i < countIn(text); i++ {
+					matches = append(matches, Match{Y: y})
+				}
+				lines := render.WrapText(text, contentWidth-4)
+				y += len(lines)
+			}
+			y++
+
+		case html.NodeBlockquote:
+			text := node.PlainText()
+			for i := 0; i < countIn(text); i++ {
+				matches = append(matches, Match{Y: y})
+			}
+			lines := render.WrapText(text, contentWidth-4)
+			y += len(lines) + 1
+
+		case html.NodeCodeBlock:
+			for i := 0; i < countIn(node.Text); i++ {
+				matches = append(matches, Match{Y: y})
+			}
+			lines := strings.Split(node.Text, "\n")
+			y += len(lines) + 2
+
+		case html.NodeTable:
+			for _, row := range node.Children {
+				for _, cell := range row.Children {
+					for i := 0; i < countIn(cell.PlainText()); i++ {
+						matches = append(matches, Match{Y: y})
+					}
+				}
+			}
+			y += len(node.Children) + 3
+
+		default:
+			y++
+		}
+	}
+
+	return matches
+}
+
+// FindAnchorY finds the Y position of an element with the given ID.
+// Returns the Y position and true if found, or 0 and false if not found.
+func FindAnchorY(doc *html.Document, id string, contentWidth int) (int, bool) {
+	if id == "" || doc == nil {
+		return 0, false
+	}
+
+	y := 0
+
+	for _, node := range doc.Content.Children {
+		// Check if this node has the target ID
+		if node.ID == id {
+			return y, true
+		}
+
+		switch node.Type {
+		case html.NodeHeading1:
+			y += 4
+
+		case html.NodeHeading2:
+			y += 3
+
+		case html.NodeHeading3:
+			y += 2
+
+		case html.NodeParagraph:
+			text := node.PlainText()
+			lines := render.WrapText(text, contentWidth)
+			y += len(lines) + 1
+
+		case html.NodeList:
+			for _, item := range node.Children {
+				text := item.PlainText()
+				lines := render.WrapText(text, contentWidth-4)
+				y += len(lines)
+			}
+			y++
+
+		case html.NodeBlockquote:
+			for _, child := range node.Children {
+				text := child.PlainText()
+				lines := render.WrapText(text, contentWidth-4)
+				y += len(lines) + 1
+			}
+
+		case html.NodeCodeBlock:
+			lines := strings.Split(node.Text, "\n")
+			y += len(lines) + 2
+
+		case html.NodeTable:
+			y += len(node.Children) + 3
+
+		case html.NodeAnchor:
+			// Anchor nodes take no space, just mark a position
+			// (ID already checked above)
+
+		default:
+			y++
+		}
+	}
+
+	return 0, false
+}
+
 // Renderer converts HTML nodes to canvas output.
 type Renderer struct {
 	canvas       *render.Canvas
@@ -81,6 +251,11 @@ type Renderer struct {
 	h1Count int
 	h2Count int
 	h3Count int
+
+	// Find in page highlighting
+	findQuery        string // lowercase query to highlight
+	findCurrentIdx   int    // global index of current match (-1 if none)
+	findMatchCounter int    // counts matches during render for highlighting
 }
 
 // NewRenderer creates a renderer for the given canvas with default 80-char margins.
@@ -109,6 +284,14 @@ func NewRendererWide(c *render.Canvas, wideMode bool) *Renderer {
 	}
 }
 
+// SetFindQuery sets the query to highlight in the document.
+// Pass empty string to clear highlighting.
+// currentIdx is the global index of the current match (-1 if none).
+func (r *Renderer) SetFindQuery(query string, currentIdx int) {
+	r.findQuery = strings.ToLower(query)
+	r.findCurrentIdx = currentIdx
+}
+
 // Render draws the document to the canvas starting at the given y offset.
 func (r *Renderer) Render(doc *html.Document, scrollY int) {
 	r.canvas.Clear()
@@ -127,6 +310,9 @@ func (r *Renderer) Render(doc *html.Document, scrollY int) {
 	r.h1Count = 0
 	r.h2Count = 0
 	r.h3Count = 0
+
+	// Reset find match counter for highlighting
+	r.findMatchCounter = 0
 
 	for _, child := range doc.Content.Children {
 		r.renderNode(child)
@@ -151,6 +337,11 @@ func (r *Renderer) Headings() []Heading {
 // Paragraphs returns the Y positions of paragraph-like elements for navigation.
 func (r *Renderer) Paragraphs() []int {
 	return r.paragraphs
+}
+
+// ContentWidth returns the content width used for text layout.
+func (r *Renderer) ContentWidth() int {
+	return r.contentWidth
 }
 
 // ContentHeight returns the total height needed for the document.
@@ -403,10 +594,9 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 		var currentLink *Link // Track current link being built
 
 		for _, span := range line {
-			// Render to canvas only if visible
-			if r.y >= 0 && r.y < r.canvas.Height() {
-				r.canvas.WriteString(x, r.y, span.Text, span.Style)
-			}
+			// Always call writeStringWithHighlight - it handles visibility internally
+			// and must count ALL matches for find navigation to work correctly
+			r.writeStringWithHighlight(x, r.y, span.Text, span.Style)
 
 			// Track links ALWAYS (for link index), consolidating consecutive spans
 			if span.Href != "" {
@@ -969,11 +1159,9 @@ func (r *Renderer) drawTableRow(x int, row *html.Node, colWidths []int) {
 			})
 		}
 
-		// Write cell content
-		for _, ch := range cellText {
-			r.canvas.Set(pos, r.y, ch, contentStyle)
-			pos++
-		}
+		// Write cell content (with find highlighting)
+		r.writeStringWithHighlight(pos, r.y, cellText, contentStyle)
+		pos += render.StringWidth(cellText)
 
 		for j := 0; j < rightPad; j++ {
 			r.canvas.Set(pos, r.y, ' ', style)
@@ -1061,10 +1249,87 @@ func (r *Renderer) renderInput(n *html.Node) {
 }
 
 func (r *Renderer) writeLine(x, y int, text string, style render.Style) {
-	if y < 0 || y >= r.canvas.Height() {
-		return
+	// Always call writeStringWithHighlight - it handles visibility internally
+	// and needs to count ALL matches (even off-screen) for find highlighting
+	r.writeStringWithHighlight(x, y, text, style)
+}
+
+// writeStringWithHighlight writes text with find query matches highlighted.
+// Returns the total width used.
+func (r *Renderer) writeStringWithHighlight(x, y int, text string, style render.Style) int {
+	// If no query, just render normally
+	if r.findQuery == "" {
+		if y >= 0 && y < r.canvas.Height() {
+			return r.canvas.WriteString(x, y, text, style)
+		}
+		return render.StringWidth(text)
 	}
-	r.canvas.WriteString(x, y, text, style)
+
+	isVisible := y >= 0 && y < r.canvas.Height()
+
+	// Find all matches and count them ALL (even off-screen) to stay in sync with findInPage
+	textLower := strings.ToLower(text)
+	pos := x
+	lastEnd := 0
+
+	for {
+		idx := strings.Index(textLower[lastEnd:], r.findQuery)
+		if idx == -1 {
+			break
+		}
+
+		matchStart := lastEnd + idx
+		matchEnd := matchStart + len(r.findQuery)
+
+		// Write text before match
+		if matchStart > lastEnd {
+			before := text[lastEnd:matchStart]
+			if isVisible {
+				pos += r.canvas.WriteString(pos, y, before, style)
+			} else {
+				pos += render.StringWidth(before)
+			}
+		}
+
+		// Determine highlight style based on global match index
+		match := text[matchStart:matchEnd]
+		highlightStyle := style
+
+		if r.findMatchCounter == r.findCurrentIdx {
+			// Current match: HOT PINK #FF00FF background, black text, bold
+			highlightStyle.UseBgRGB = true
+			highlightStyle.BgRGB = [3]uint8{255, 0, 255}
+			highlightStyle.FgColor = render.ColorBlack
+			highlightStyle.Bold = true
+		} else {
+			// Other matches: yellow background, black text
+			highlightStyle.BgColor = render.BgYellow
+			highlightStyle.FgColor = render.ColorBlack
+		}
+
+		// Increment counter for highlighting sync
+		r.findMatchCounter++
+
+		if isVisible {
+			pos += r.canvas.WriteString(pos, y, match, highlightStyle)
+		} else {
+			pos += render.StringWidth(match)
+		}
+
+		lastEnd = matchEnd
+	}
+
+	// Write remaining text after last match
+	if lastEnd < len(text) {
+		remaining := text[lastEnd:]
+		if isVisible {
+			pos += r.canvas.WriteString(pos, y, remaining, style)
+		} else {
+			pos += render.StringWidth(remaining)
+		}
+	}
+
+	return pos - x
 }
 
 // GenerateLabels creates short jump labels for the given number of links.

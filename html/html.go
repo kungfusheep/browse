@@ -3,11 +3,15 @@ package html
 
 import (
 	"io"
+	"regexp"
 	"strings"
 
 	"browse/latex"
 	"golang.org/x/net/html"
 )
+
+// whitespaceRe collapses sequences of whitespace to a single space
+var whitespaceRe = regexp.MustCompile(`\s+`)
 
 // Options configures HTML parsing behavior.
 type Options struct {
@@ -53,6 +57,7 @@ type Node struct {
 	Text     string
 	Children []*Node
 	Href     string // for links
+	ID       string // element id attribute (for anchor links)
 
 	// Form fields
 	FormAction string // for forms
@@ -89,6 +94,7 @@ const (
 	NodeTable      // A data table
 	NodeTableRow   // A table row
 	NodeTableCell  // A table cell (th or td)
+	NodeAnchor     // An anchor point (ID only, no content)
 )
 
 // Parse extracts article content from HTML, returning a Document with
@@ -285,37 +291,37 @@ func extractContentOnly(n *html.Node, parent *Node) {
 		case html.ElementNode:
 			switch c.Data {
 			case "h1":
-				node := &Node{Type: NodeHeading1, Text: textContentDeduped(c)}
+				node := &Node{Type: NodeHeading1, Text: textContentDeduped(c), ID: getAttr(c, "id")}
 				extractHeadingLink(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "h2":
-				node := &Node{Type: NodeHeading2, Text: textContentDeduped(c)}
+				node := &Node{Type: NodeHeading2, Text: textContentDeduped(c), ID: getAttr(c, "id")}
 				extractHeadingLink(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "h3", "h4", "h5", "h6":
-				node := &Node{Type: NodeHeading3, Text: textContentDeduped(c)}
+				node := &Node{Type: NodeHeading3, Text: textContentDeduped(c), ID: getAttr(c, "id")}
 				extractHeadingLink(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "p":
-				node := &Node{Type: NodeParagraph}
+				node := &Node{Type: NodeParagraph, ID: getAttr(c, "id")}
 				extractInline(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "blockquote":
-				node := &Node{Type: NodeBlockquote}
+				node := &Node{Type: NodeBlockquote, ID: getAttr(c, "id")}
 				extractContentOnly(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "ul", "ol":
-				node := &Node{Type: NodeList}
+				node := &Node{Type: NodeList, ID: getAttr(c, "id")}
 				extractList(c, node)
 				parent.Children = append(parent.Children, node)
 
 			case "pre":
-				node := &Node{Type: NodeCodeBlock, Text: textContent(c)}
+				node := &Node{Type: NodeCodeBlock, Text: preformattedContent(c), ID: getAttr(c, "id")}
 				parent.Children = append(parent.Children, node)
 
 			case "nav", "header", "footer", "aside", "menu":
@@ -347,6 +353,10 @@ func extractContentOnly(n *html.Node, parent *Node) {
 				if getAttr(c, "role") == "navigation" {
 					continue
 				}
+				// Capture ID as anchor point before recursing
+				if id := getAttr(c, "id"); id != "" {
+					parent.Children = append(parent.Children, &Node{Type: NodeAnchor, ID: id})
+				}
 				extractContentOnly(c, parent)
 
 			case "tr":
@@ -358,6 +368,15 @@ func extractContentOnly(n *html.Node, parent *Node) {
 				extractContentOnly(c, parent)
 
 			case "a":
+				// Capture ID or name as anchor point (for fragment navigation)
+				anchorID := getAttr(c, "id")
+				if anchorID == "" {
+					anchorID = getAttr(c, "name") // Legacy anchor format
+				}
+				if anchorID != "" {
+					parent.Children = append(parent.Children, &Node{Type: NodeAnchor, ID: anchorID})
+				}
+
 				// Standalone link (not inside a paragraph) - treat as a paragraph with a link
 				href := getAttr(c, "href")
 				text := strings.TrimSpace(textContent(c))
@@ -920,7 +939,8 @@ func extractInline(n *html.Node, parent *Node) {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		switch c.Type {
 		case html.TextNode:
-			text := c.Data
+			// Normalize HTML whitespace: collapse sequences to single space
+			text := whitespaceRe.ReplaceAllString(c.Data, " ")
 			if text != "" {
 				// Process any LaTeX in the text
 				if latexEnabled() && latex.ContainsLaTeX(text) {
@@ -965,7 +985,9 @@ func textContent(n *html.Node) string {
 	var extract func(*html.Node)
 	extract = func(n *html.Node) {
 		if n.Type == html.TextNode {
-			sb.WriteString(n.Data)
+			// Normalize whitespace: collapse sequences to single space
+			text := whitespaceRe.ReplaceAllString(n.Data, " ")
+			sb.WriteString(text)
 		}
 		// Skip non-content elements
 		if n.Type == html.ElementNode {
@@ -989,12 +1011,30 @@ func textContent(n *html.Node) string {
 	}
 	extract(n)
 
-	// Process any remaining LaTeX in the text
-	text := strings.TrimSpace(sb.String())
+	// Normalize the final result - collapse any remaining whitespace sequences
+	text := whitespaceRe.ReplaceAllString(sb.String(), " ")
+	text = strings.TrimSpace(text)
 	if latexEnabled() && latex.ContainsLaTeX(text) {
 		text = latex.ProcessText(text)
 	}
 	return text
+}
+
+// preformattedContent extracts text from a node preserving whitespace (for <pre> blocks).
+func preformattedContent(n *html.Node) string {
+	var sb strings.Builder
+	var extract func(*html.Node)
+	extract = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			sb.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			extract(c)
+		}
+	}
+	extract(n)
+	// Just trim leading/trailing whitespace, preserve internal newlines
+	return strings.TrimSpace(sb.String())
 }
 
 // extractMathMLLatex extracts LaTeX from MathML annotation elements.
@@ -1060,9 +1100,18 @@ func getAttr(n *html.Node, key string) string {
 }
 
 // extractHeadingLink finds a link inside a heading element and adds it as a child.
+// Also captures IDs from anchor elements if the heading doesn't have one.
 func extractHeadingLink(n *html.Node, parent *Node) {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type == html.ElementNode && c.Data == "a" {
+			// Capture ID from anchor if heading doesn't have one
+			if parent.ID == "" {
+				if id := getAttr(c, "id"); id != "" {
+					parent.ID = id
+				} else if name := getAttr(c, "name"); name != "" {
+					parent.ID = name
+				}
+			}
 			link := &Node{Type: NodeLink, Href: getAttr(c, "href")}
 			parent.Children = append(parent.Children, link)
 			return

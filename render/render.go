@@ -29,7 +29,10 @@ type Style struct {
 	Dim       bool
 	Underline bool
 	Reverse   bool
-	FgColor   int // ANSI foreground color code (0 = default, 32 = green, 33 = yellow, etc.)
+	FgColor   int      // ANSI foreground color code (0 = default, 32 = green, 33 = yellow, etc.)
+	BgColor   int      // ANSI background color code (0 = default, 40-47 = colors)
+	BgRGB     [3]uint8 // True color background RGB values
+	UseBgRGB  bool     // Use BgRGB instead of BgColor
 }
 
 // ANSI foreground color codes
@@ -43,6 +46,19 @@ const (
 	ColorMagenta = 35
 	ColorCyan    = 36
 	ColorWhite   = 37
+)
+
+// ANSI background color codes
+const (
+	BgDefault = 0
+	BgBlack   = 40
+	BgRed     = 41
+	BgGreen   = 42
+	BgYellow  = 43
+	BgBlue    = 44
+	BgMagenta = 45
+	BgCyan    = 46
+	BgWhite   = 47
 )
 
 // BoxStyle defines the characters used for drawing boxes.
