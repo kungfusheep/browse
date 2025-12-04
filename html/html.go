@@ -351,10 +351,15 @@ func extractContentOnly(n *html.Node, parent *Node) {
 
 			case "a":
 				// Standalone link (not inside a paragraph) - treat as a paragraph with a link
+				href := getAttr(c, "href")
 				text := strings.TrimSpace(textContent(c))
-				if text != "" {
+				// If no text, use the href as display text
+				if text == "" && href != "" {
+					text = href
+				}
+				if text != "" && href != "" {
 					node := &Node{Type: NodeParagraph}
-					link := &Node{Type: NodeLink, Href: getAttr(c, "href")}
+					link := &Node{Type: NodeLink, Href: href}
 					link.Children = append(link.Children, &Node{Type: NodeText, Text: text})
 					node.Children = append(node.Children, link)
 					parent.Children = append(parent.Children, node)
@@ -423,6 +428,10 @@ func extractNavLinks(n *html.Node) *Node {
 		if node.Type == html.ElementNode && node.Data == "a" {
 			text := strings.TrimSpace(textContent(node))
 			href := getAttr(node, "href")
+			// If no text, use href as display text
+			if text == "" && href != "" {
+				text = href
+			}
 			if text != "" && href != "" {
 				link := &Node{
 					Type: NodeLink,
@@ -597,14 +606,22 @@ func extractCellContent(n *html.Node, cell *Node) {
 	if len(links) == 1 {
 		linkText := strings.TrimSpace(textContent(links[0]))
 		href := getAttr(links[0], "href")
-		if linkText != "" && href != "" && len(linkText) >= len(text)/2 {
+		// If no link text, use href as display text
+		if linkText == "" && href != "" {
+			linkText = href
+		}
+		displayText := text
+		if displayText == "" {
+			displayText = linkText
+		}
+		if linkText != "" && href != "" && (len(linkText) >= len(text)/2 || text == "") {
 			linkNode := &Node{
 				Type: NodeLink,
 				Href: href,
 			}
 			linkNode.Children = append(linkNode.Children, &Node{
 				Type: NodeText,
-				Text: text, // Use full cell text for display
+				Text: displayText, // Use full cell text for display
 			})
 			cell.Children = append(cell.Children, linkNode)
 			return
@@ -832,6 +849,10 @@ func extractCellLinks(n *html.Node, links *[]*Node) {
 	if n.Type == html.ElementNode && n.Data == "a" {
 		href := getAttr(n, "href")
 		text := strings.TrimSpace(textContent(n))
+		// If no text, use href as display text
+		if text == "" && href != "" {
+			text = href
+		}
 		if href != "" && text != "" {
 			link := &Node{Type: NodeLink, Href: href}
 			link.Children = append(link.Children, &Node{Type: NodeText, Text: text})

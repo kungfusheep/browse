@@ -466,35 +466,39 @@ func run(url string) error {
 
 		if jumpMode {
 			labels = document.GenerateLabels(len(renderer.Links()))
-			renderer.RenderLinkLabels(labels)
+			renderer.RenderLinkLabels(labels, jumpInput)
 		}
 		if inputMode {
 			labels = document.GenerateLabels(len(renderer.Inputs()))
-			renderer.RenderInputLabels(labels)
+			renderer.RenderInputLabels(labels, jumpInput)
 		}
 		if tocMode {
 			canvas.DimAll()
 			labels = document.GenerateLabels(len(renderer.Headings()))
-			renderer.RenderTOC(labels)
+			renderer.RenderTOC(labels, jumpInput)
 		}
 		if navMode && len(doc.Navigation) > 0 {
 			canvas.DimAll()
-			// Count total links across all nav sections
-			totalLinks := 0
-			for _, nav := range doc.Navigation {
-				totalLinks += len(nav.Children)
+			// Generate labels only for visible items (nav box height - 4 for borders/title/footer)
+			visibleCount := height - 10
+			if visibleCount < 10 {
+				visibleCount = 10
 			}
-			labels = document.GenerateLabels(totalLinks)
-			navLinks = renderer.RenderNavigation(doc.Navigation, labels, navScrollOffset)
+			labels = document.GenerateLabels(visibleCount)
+			navLinks = renderer.RenderNavigation(doc.Navigation, labels, navScrollOffset, jumpInput)
 		}
 		if linkIndexMode {
 			canvas.DimAll()
-			labels = document.GenerateLabels(len(renderer.Links()))
-			renderer.RenderLinkIndex(labels, linkScrollOffset)
+			// Generate labels only for visible items
+			visibleCount := len(renderer.Links())
+			if visibleCount > height-8 {
+				visibleCount = height - 8
+			}
+			labels = document.GenerateLabels(visibleCount)
+			renderer.RenderLinkIndex(labels, linkScrollOffset, jumpInput)
 		}
 		if bufferMode {
 			canvas.DimAll()
-			labels = document.GenerateLabels(len(buffers))
 
 			// Draw buffer list as centered overlay box
 			boxWidth := 70
@@ -505,6 +509,10 @@ func run(url string) error {
 			if boxHeight > height-4 {
 				boxHeight = height - 4
 			}
+			visibleCount := boxHeight - 4
+
+			// Generate labels only for visible items
+			labels = document.GenerateLabels(visibleCount)
 
 			startX := (width - boxWidth) / 2
 			startY := (height - boxHeight) / 2
@@ -526,9 +534,9 @@ func run(url string) error {
 
 			// Draw buffers with labels
 			by := startY + 2
-			visibleCount := boxHeight - 4
 			for i := bufferScrollOffset; i < len(buffers) && i < bufferScrollOffset+visibleCount; i++ {
-				if i >= len(labels) {
+				labelIdx := i - bufferScrollOffset
+				if labelIdx >= len(labels) {
 					break
 				}
 
@@ -536,7 +544,7 @@ func run(url string) error {
 				bx := startX + 2
 
 				// Format: [label] [*] title - url
-				label := labels[i]
+				label := labels[labelIdx]
 				isCurrent := i == currentBufferIdx
 
 				// Extract title from URL or use URL
@@ -545,9 +553,20 @@ func run(url string) error {
 					displayTitle = displayTitle[:37] + "..."
 				}
 
-				// Draw label (highlighted)
+				// Check if this label matches the current input prefix
+				matches := strings.HasPrefix(label, jumpInput)
+
+				// Draw label with typed portion highlighted
 				for j, ch := range label {
-					canvas.Set(bx+j, by, ch, render.Style{Reverse: true, Bold: true})
+					var style render.Style
+					if !matches && jumpInput != "" {
+						style = render.Style{Dim: true}
+					} else if j < len(jumpInput) {
+						style = render.Style{Bold: true, FgColor: render.ColorGreen}
+					} else {
+						style = render.Style{Reverse: true, Bold: true}
+					}
+					canvas.Set(bx+j, by, ch, style)
 				}
 
 				// Current buffer marker
@@ -555,10 +574,14 @@ func run(url string) error {
 				if isCurrent {
 					marker = " *"
 				}
-				canvas.WriteString(bx+len(label), by, marker, render.Style{Bold: isCurrent})
+				textStyle := render.Style{Bold: isCurrent}
+				if !matches && jumpInput != "" {
+					textStyle.Dim = true
+				}
+				canvas.WriteString(bx+len(label), by, marker, textStyle)
 
 				// URL
-				canvas.WriteString(bx+len(label)+2, by, displayTitle, render.Style{Bold: isCurrent})
+				canvas.WriteString(bx+len(label)+2, by, displayTitle, textStyle)
 
 				by++
 			}
@@ -578,7 +601,6 @@ func run(url string) error {
 		}
 		if favouritesMode && favStore != nil {
 			canvas.DimAll()
-			labels = document.GenerateLabels(favStore.Len())
 
 			// Draw favourites list as centered overlay box
 			boxWidth := 70
@@ -592,6 +614,10 @@ func run(url string) error {
 			if boxHeight > height-4 {
 				boxHeight = height - 4
 			}
+			visibleCount := boxHeight - 4
+
+			// Generate labels only for visible items
+			labels = document.GenerateLabels(visibleCount)
 
 			startX := (width - boxWidth) / 2
 			startY := (height - boxHeight) / 2
@@ -622,9 +648,9 @@ func run(url string) error {
 			} else {
 				// Draw favourites with labels
 				by := startY + 2
-				visibleCount := boxHeight - 4
 				for i := favouritesScrollOffset; i < favStore.Len() && i < favouritesScrollOffset+visibleCount; i++ {
-					if i >= len(labels) {
+					labelIdx := i - favouritesScrollOffset
+					if labelIdx >= len(labels) {
 						break
 					}
 
@@ -632,16 +658,29 @@ func run(url string) error {
 					bx := startX + 2
 
 					// Format: [label] title (truncated URL)
-					label := labels[i]
+					label := labels[labelIdx]
 
-					// Draw label (highlighted, red if delete mode)
-					labelStyle := render.Style{Reverse: true, Bold: true}
-					if favouritesDeleteMode {
-						labelStyle.Reverse = false
-						labelStyle.Bold = true
-					}
+					// Check if this label matches the current input prefix
+					matches := strings.HasPrefix(label, jumpInput)
+
+					// Draw label with typed portion highlighted
 					for j, ch := range label {
-						canvas.Set(bx+j, by, ch, labelStyle)
+						var style render.Style
+						if favouritesDeleteMode {
+							// Delete mode - show in red
+							if j < len(jumpInput) {
+								style = render.Style{Bold: true, FgColor: render.ColorRed}
+							} else {
+								style = render.Style{Bold: true, FgColor: render.ColorRed, Dim: true}
+							}
+						} else if !matches && jumpInput != "" {
+							style = render.Style{Dim: true}
+						} else if j < len(jumpInput) {
+							style = render.Style{Bold: true, FgColor: render.ColorGreen}
+						} else {
+							style = render.Style{Reverse: true, Bold: true}
+						}
+						canvas.Set(bx+j, by, ch, style)
 					}
 
 					// Title
@@ -653,7 +692,11 @@ func run(url string) error {
 					if len(displayTitle) > maxLen {
 						displayTitle = displayTitle[:maxLen-3] + "..."
 					}
-					canvas.WriteString(bx+len(label)+2, by, displayTitle, render.Style{})
+					textStyle := render.Style{}
+					if !matches && jumpInput != "" {
+						textStyle.Dim = true
+					}
+					canvas.WriteString(bx+len(label)+2, by, displayTitle, textStyle)
 
 					by++
 				}
@@ -668,7 +711,7 @@ func run(url string) error {
 			}
 
 			// Footer hint
-			hint := " label=open  d=delete mode  ESC=cancel "
+			hint := " label=open  x=delete mode  ESC=cancel "
 			if favouritesDeleteMode {
 				hint = " label=DELETE  ESC=cancel "
 			}
@@ -829,8 +872,8 @@ func run(url string) error {
 					if !couldMatch {
 						jumpMode = false
 						jumpInput = ""
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -876,8 +919,8 @@ func run(url string) error {
 					if !couldMatch {
 						inputMode = false
 						jumpInput = ""
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -974,8 +1017,8 @@ func run(url string) error {
 					if !couldMatch {
 						tocMode = false
 						jumpInput = ""
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -1015,17 +1058,18 @@ func run(url string) error {
 			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k':
 				jumpInput += string(buf[0])
 
-				// Check for exact match
+				// Check for exact match - labels are for visible items only
 				matched := false
 				for i, label := range labels {
-					if label == jumpInput && i < len(navLinks) {
+					actualIdx := navScrollOffset + i
+					if label == jumpInput && actualIdx < len(navLinks) {
 						// Found a match - navigate to the link!
 						matched = true
 						navMode = false
 						jumpInput = ""
 						navScrollOffset = 0
 
-						newURL := resolveURL(url, navLinks[i].Href)
+						newURL := resolveURL(url, navLinks[actualIdx].Href)
 						loading = true
 						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 						loading = false
@@ -1050,8 +1094,8 @@ func run(url string) error {
 						navMode = false
 						jumpInput = ""
 						navScrollOffset = 0
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -1087,18 +1131,19 @@ func run(url string) error {
 			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k':
 				jumpInput += string(buf[0])
 
-				// Check for exact match
+				// Check for exact match - labels are for visible items only
 				matched := false
 				links := renderer.Links()
 				for i, label := range labels {
-					if label == jumpInput && i < len(links) {
+					actualIdx := linkScrollOffset + i
+					if label == jumpInput && actualIdx < len(links) {
 						// Found a match - navigate to the link!
 						matched = true
 						linkIndexMode = false
 						jumpInput = ""
 						linkScrollOffset = 0
 
-						newURL := resolveURL(url, links[i].Href)
+						newURL := resolveURL(url, links[actualIdx].Href)
 						loading = true
 						newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 						loading = false
@@ -1123,8 +1168,8 @@ func run(url string) error {
 						linkIndexMode = false
 						jumpInput = ""
 						linkScrollOffset = 0
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -1202,10 +1247,11 @@ func run(url string) error {
 			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k' && buf[0] != 'x':
 				jumpInput += string(buf[0])
 
-				// Check for exact match
+				// Check for exact match - labels are for visible items only
 				matched := false
 				for i, label := range labels {
-					if label == jumpInput && i < len(buffers) {
+					actualIdx := bufferScrollOffset + i
+					if label == jumpInput && actualIdx < len(buffers) {
 						// Found a match - switch to buffer!
 						matched = true
 						bufferMode = false
@@ -1216,7 +1262,7 @@ func run(url string) error {
 						buffers[currentBufferIdx].current.scrollY = scrollY
 
 						// Switch to selected buffer
-						currentBufferIdx = i
+						currentBufferIdx = actualIdx
 						buf := getCurrentBuffer()
 						doc = buf.current.doc
 						url = buf.current.url
@@ -1245,8 +1291,8 @@ func run(url string) error {
 						bufferMode = false
 						jumpInput = ""
 						bufferScrollOffset = 0
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -1279,22 +1325,23 @@ func run(url string) error {
 				}
 				redraw()
 
-			case buf[0] == 'd' && !favouritesDeleteMode: // Enter delete mode
+			case buf[0] == 'x' && !favouritesDeleteMode: // Enter delete mode (x like buffer close)
 				favouritesDeleteMode = true
 				jumpInput = ""
 				redraw()
 
-			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k' && buf[0] != 'd':
+			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'j' && buf[0] != 'k' && buf[0] != 'x':
 				jumpInput += string(buf[0])
 
-				// Check for exact match
+				// Check for exact match - labels are for visible items only
 				matched := false
 				for i, label := range labels {
-					if label == jumpInput && i < favStore.Len() {
+					actualIdx := favouritesScrollOffset + i
+					if label == jumpInput && actualIdx < favStore.Len() {
 						matched = true
 						if favouritesDeleteMode {
 							// Delete this favourite
-							favStore.Remove(i)
+							favStore.Remove(actualIdx)
 							favStore.Save()
 							favouritesDeleteMode = false
 							jumpInput = ""
@@ -1305,7 +1352,7 @@ func run(url string) error {
 							redraw()
 						} else {
 							// Open this favourite
-							fav := favStore.Favourites[i]
+							fav := favStore.Favourites[actualIdx]
 							favouritesMode = false
 							jumpInput = ""
 							favouritesScrollOffset = 0
@@ -1338,8 +1385,8 @@ func run(url string) error {
 					if !couldMatch {
 						// Invalid input, reset
 						jumpInput = ""
-						redraw()
 					}
+					redraw() // Always redraw to show input highlighting
 				}
 			}
 			continue
@@ -1400,12 +1447,7 @@ func run(url string) error {
 					searchInput = ""
 					loading = true
 
-					// Show loading status
-					canvas.Clear()
-					canvas.WriteString(width/2-10, height/2, "Searching...", render.Style{Bold: true})
-					canvas.RenderTo(os.Stdout)
-
-					results, err := searchProvider.Search(query)
+					results, err := searchWithSpinner(canvas, searchProvider, query)
 					loading = false
 					if err == nil && results != nil {
 						// Convert results to HTML and parse as document
@@ -1958,6 +2000,10 @@ func run(url string) error {
 					maxScroll = 0
 				}
 
+				// Update search provider and keybindings
+				searchProvider = search.ProviderByName(cfg.Search.DefaultProvider)
+				kb = cfg.Keybindings
+
 				// Show success briefly
 				canvas.Clear()
 				canvas.WriteString(width/2-10, height/2, "Config reloaded!", render.Style{Bold: true})
@@ -2181,17 +2227,43 @@ func fetchAndParseQuiet(url string) (*html.Document, error) {
 
 // fetchWithBrowserQuiet uses headless Chrome without spinner
 func fetchWithBrowserQuiet(url string) (*html.Document, error) {
-	result, err := fetcher.WithBrowser(url)
-	if err != nil {
-		return nil, err
+	return fetchWithBrowserCtx(context.Background(), url)
+}
+
+// fetchWithBrowserCtx uses headless Chrome with context for cancellation.
+func fetchWithBrowserCtx(ctx context.Context, url string) (*html.Document, error) {
+	// Check if already cancelled
+	if ctx.Err() != nil {
+		return nil, ErrCancelled
 	}
 
-	doc, err := html.ParseString(result.HTML)
-	if err != nil {
-		return nil, fmt.Errorf("parsing HTML: %w", err)
+	// Run browser fetch in goroutine so we can check context
+	type result struct {
+		doc *html.Document
+		err error
 	}
+	resultCh := make(chan result, 1)
 
-	return doc, nil
+	go func() {
+		res, err := fetcher.WithBrowser(url)
+		if err != nil {
+			resultCh <- result{nil, err}
+			return
+		}
+		doc, err := html.ParseString(res.HTML)
+		if err != nil {
+			resultCh <- result{nil, fmt.Errorf("parsing HTML: %w", err)}
+			return
+		}
+		resultCh <- result{doc, nil}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ErrCancelled
+	case r := <-resultCh:
+		return r.doc, r.err
+	}
 }
 
 // fetchQuietWithHTML fetches and returns both parsed doc and raw HTML.
@@ -2225,7 +2297,12 @@ func fetchQuietWithHTML(targetURL string) (*html.Document, string, error) {
 
 // fetchWithRules fetches and parses, applying cached rules if available.
 func fetchWithRules(targetURL string, cache *rules.Cache) (*html.Document, string, error) {
-	req, err := http.NewRequest("GET", targetURL, nil)
+	return fetchWithRulesCtx(context.Background(), targetURL, cache)
+}
+
+// fetchWithRulesCtx fetches and parses with context for cancellation.
+func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache) (*html.Document, string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("creating request: %w", err)
 	}
@@ -2234,12 +2311,18 @@ func fetchWithRules(targetURL string, cache *rules.Cache) (*html.Document, strin
 	client := &http.Client{Timeout: fetcher.Timeout()}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, "", ErrCancelled
+		}
 		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, "", ErrCancelled
+		}
 		return nil, "", fmt.Errorf("reading body: %w", err)
 	}
 
@@ -2528,13 +2611,20 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 	return html.ParseString(page)
 }
 
+// ErrCancelled is returned when an operation is cancelled by the user.
+var ErrCancelled = fmt.Errorf("cancelled")
+
 // withSpinner runs a function while showing an animated spinner.
 // The work function runs in a goroutine while the spinner animates.
-func withSpinner[T any](canvas *render.Canvas, message string, work func() T) T {
+// Press Escape to cancel the operation.
+func withSpinner[T any](canvas *render.Canvas, message string, work func(ctx context.Context) T) T {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	resultCh := make(chan T, 1)
 
 	go func() {
-		resultCh <- work()
+		resultCh <- work(ctx)
 	}()
 
 	loader := render.NewLoadingDisplay(render.SpinnerWave, message)
@@ -2542,10 +2632,39 @@ func withSpinner[T any](canvas *render.Canvas, message string, work func() T) T 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Set up non-blocking keyboard read
+	keyCh := make(chan byte, 1)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+				return
+			}
+			select {
+			case keyCh <- buf[0]:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case result := <-resultCh:
 			return result
+		case key := <-keyCh:
+			// Escape (27) or Ctrl+C (3) cancels
+			if key == 27 || key == 3 {
+				cancel()
+				// Show cancelled message briefly
+				canvas.Clear()
+				loader.DrawBox(canvas, "Cancelled")
+				canvas.RenderTo(os.Stdout)
+				time.Sleep(200 * time.Millisecond)
+				// Wait for goroutine to finish and return its result
+				return <-resultCh
+			}
 		case <-ticker.C:
 			loader.Tick()
 			canvas.Clear()
@@ -2563,9 +2682,10 @@ type fetchResult struct {
 }
 
 // fetchWithSpinner fetches a URL while showing an animated spinner.
+// Cancellable with Escape key.
 func fetchWithSpinner(canvas *render.Canvas, targetURL string, ruleCache *rules.Cache) (*html.Document, string, error) {
-	result := withSpinner(canvas, targetURL, func() fetchResult {
-		doc, content, err := fetchWithRules(targetURL, ruleCache)
+	result := withSpinner(canvas, targetURL, func(ctx context.Context) fetchResult {
+		doc, content, err := fetchWithRulesCtx(ctx, targetURL, ruleCache)
 		return fetchResult{doc, content, err}
 	})
 	return result.doc, result.content, result.err
@@ -2578,9 +2698,10 @@ type browserResult struct {
 }
 
 // fetchBrowserWithSpinner fetches a URL using browser (JS) while showing spinner.
+// Cancellable with Escape key.
 func fetchBrowserWithSpinner(canvas *render.Canvas, targetURL string) (*html.Document, error) {
-	result := withSpinner(canvas, targetURL+" (JS)", func() browserResult {
-		doc, err := fetchWithBrowserQuiet(targetURL)
+	result := withSpinner(canvas, targetURL+" (JS)", func(ctx context.Context) browserResult {
+		doc, err := fetchWithBrowserCtx(ctx, targetURL)
 		return browserResult{doc, err}
 	})
 	return result.doc, result.err
@@ -2593,9 +2714,11 @@ type ruleGenResult struct {
 }
 
 // generateRulesWithSpinner generates AI rules (v2) while showing spinner.
+// Cancellable with Escape key.
 func generateRulesWithSpinner(canvas *render.Canvas, generator *rules.GeneratorV2, domain, targetURL, htmlContent, providerName string) (*rules.Rule, error) {
-	result := withSpinner(canvas, "Generating template with "+providerName+"...", func() ruleGenResult {
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	result := withSpinner(canvas, "Generating template with "+providerName+"...", func(ctx context.Context) ruleGenResult {
+		// Add timeout to the cancellable context
+		ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
 		rule, err := generator.GeneratePageType(ctx, domain, targetURL, htmlContent)
 		return ruleGenResult{rule, err}
@@ -2604,12 +2727,31 @@ func generateRulesWithSpinner(canvas *render.Canvas, generator *rules.GeneratorV
 }
 
 // generateRulesV1WithSpinner generates AI rules (v1 fallback) while showing spinner.
+// Cancellable with Escape key.
 func generateRulesV1WithSpinner(canvas *render.Canvas, generator *rules.Generator, domain, htmlContent, providerName string) (*rules.Rule, error) {
-	result := withSpinner(canvas, "Trying v1 fallback with "+providerName+"...", func() ruleGenResult {
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	result := withSpinner(canvas, "Trying v1 fallback with "+providerName+"...", func(ctx context.Context) ruleGenResult {
+		// Add timeout to the cancellable context
+		ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
 		rule, err := generator.Generate(ctx, domain, htmlContent)
 		return ruleGenResult{rule, err}
 	})
 	return result.rule, result.err
+}
+
+// searchResult holds the result of a web search operation.
+type searchResult struct {
+	results *search.Results
+	err     error
+}
+
+// searchWithSpinner performs a web search while showing spinner.
+// Cancellable with Escape key.
+func searchWithSpinner(canvas *render.Canvas, provider search.Provider, query string) (*search.Results, error) {
+	result := withSpinner(canvas, "Searching "+provider.Name()+"...", func(ctx context.Context) searchResult {
+		// TODO: Pass context to search provider when supported
+		results, err := provider.Search(query)
+		return searchResult{results, err}
+	})
+	return result.results, result.err
 }

@@ -409,19 +409,37 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 	// Render each line
 	for _, line := range lines {
 		x := r.leftMargin
+		var currentLink *Link // Track current link being built
+
 		for _, span := range line {
 			if r.y >= 0 && r.y < r.canvas.Height() {
 				r.canvas.WriteString(x, r.y, span.Text, span.Style)
 
-				// Track links
+				// Track links - consolidate consecutive spans with same href
 				if span.Href != "" {
-					r.links = append(r.links, Link{
-						Href:   span.Href,
-						Text:   span.Text,
-						X:      x,
-						Y:      r.y,
-						Length: render.StringWidth(span.Text),
-					})
+					if currentLink != nil && currentLink.Href == span.Href {
+						// Extend current link (include any gap from justification)
+						currentLink.Text += span.Text
+						currentLink.Length = x + render.StringWidth(span.Text) - currentLink.X
+					} else {
+						// Start new link
+						link := Link{
+							Href:   span.Href,
+							Text:   span.Text,
+							X:      x,
+							Y:      r.y,
+							Length: render.StringWidth(span.Text),
+						}
+						r.links = append(r.links, link)
+						currentLink = &r.links[len(r.links)-1]
+					}
+				} else {
+					// Non-link span - keep currentLink if we're inside a link
+					// (justification spaces between link words)
+					if currentLink != nil {
+						// Check if next span continues the same link
+						// For now, keep currentLink active to catch the next span
+					}
 				}
 			}
 			x += render.StringWidth(span.Text)
@@ -598,16 +616,27 @@ func (r *Renderer) renderList(n *html.Node) {
 				r.writeLine(r.leftMargin, r.y, "•", render.Style{})
 			}
 			x := r.leftMargin + 2
+			var currentLink *Link // Track current link being built
+
 			for _, span := range lineSpans {
-				// Track links
+				// Track links - consolidate consecutive spans with same href
 				if span.Href != "" {
-					r.links = append(r.links, Link{
-						Href:   span.Href,
-						Text:   span.Text,
-						X:      x,
-						Y:      r.y,
-						Length: render.StringWidth(span.Text),
-					})
+					if currentLink != nil && currentLink.Href == span.Href {
+						// Extend current link
+						currentLink.Text += span.Text
+						currentLink.Length = x + render.StringWidth(span.Text) - currentLink.X
+					} else {
+						// Start new link
+						link := Link{
+							Href:   span.Href,
+							Text:   span.Text,
+							X:      x,
+							Y:      r.y,
+							Length: render.StringWidth(span.Text),
+						}
+						r.links = append(r.links, link)
+						currentLink = &r.links[len(r.links)-1]
+					}
 				}
 				r.writeLine(x, r.y, span.Text, span.Style)
 				x += render.StringWidth(span.Text)
@@ -1052,10 +1081,31 @@ func (r *Renderer) writeLine(x, y int, text string, style render.Style) {
 }
 
 // GenerateLabels creates short jump labels for the given number of links.
-// Uses home row keys for speed: a, s, d, f, g, h, j, k, l
-// Then combinations: aa, as, ad...
+// Uses all lowercase letters except j, k (scroll) and x (delete/close).
+// Single chars for small lists, two-char combos for larger lists.
 func GenerateLabels(count int) []string {
-	keys := []byte("asdfghjkl")
+	return GenerateLabelsExcluding(count, "jkx")
+}
+
+// GenerateLabelsExcluding creates labels excluding specific keys.
+// Useful when some keys are reserved (e.g., j/k for scrolling).
+func GenerateLabelsExcluding(count int, exclude string) []string {
+	// Build key set excluding reserved keys
+	allKeys := "abcdefghilmnopqrstuvwyz"
+	var keys []byte
+	for i := 0; i < len(allKeys); i++ {
+		excluded := false
+		for j := 0; j < len(exclude); j++ {
+			if allKeys[i] == exclude[j] {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			keys = append(keys, allKeys[i])
+		}
+	}
+
 	labels := make([]string, 0, count)
 
 	// If we can fit in single chars, use them
@@ -1083,7 +1133,7 @@ func GenerateLabels(count int) []string {
 }
 
 // RenderLinkLabels overlays jump labels on visible links.
-func (r *Renderer) RenderLinkLabels(labels []string) {
+func (r *Renderer) RenderLinkLabels(labels []string, inputPrefix string) {
 	for i, link := range r.links {
 		if i >= len(labels) {
 			break
@@ -1093,17 +1143,27 @@ func (r *Renderer) RenderLinkLabels(labels []string) {
 		}
 
 		label := labels[i]
-		// Draw label with reverse video for visibility
+		matches := strings.HasPrefix(label, inputPrefix)
+
+		// Draw label with typed portion highlighted
 		for j, ch := range label {
 			if link.X+j < r.canvas.Width() {
-				r.canvas.Set(link.X+j, link.Y, ch, render.Style{Reverse: true, Bold: true})
+				var style render.Style
+				if !matches && inputPrefix != "" {
+					style = render.Style{Dim: true}
+				} else if j < len(inputPrefix) {
+					style = render.Style{Bold: true, FgColor: render.ColorGreen}
+				} else {
+					style = render.Style{Reverse: true, Bold: true}
+				}
+				r.canvas.Set(link.X+j, link.Y, ch, style)
 			}
 		}
 	}
 }
 
 // RenderInputLabels overlays jump labels on visible inputs.
-func (r *Renderer) RenderInputLabels(labels []string) {
+func (r *Renderer) RenderInputLabels(labels []string, inputPrefix string) {
 	for i, input := range r.inputs {
 		if i >= len(labels) {
 			break
@@ -1113,10 +1173,20 @@ func (r *Renderer) RenderInputLabels(labels []string) {
 		}
 
 		label := labels[i]
-		// Draw label with reverse video for visibility
+		matches := strings.HasPrefix(label, inputPrefix)
+
+		// Draw label with typed portion highlighted
 		for j, ch := range label {
 			if input.X+j < r.canvas.Width() {
-				r.canvas.Set(input.X+j, input.Y, ch, render.Style{Reverse: true, Bold: true})
+				var style render.Style
+				if !matches && inputPrefix != "" {
+					style = render.Style{Dim: true}
+				} else if j < len(inputPrefix) {
+					style = render.Style{Bold: true, FgColor: render.ColorGreen}
+				} else {
+					style = render.Style{Reverse: true, Bold: true}
+				}
+				r.canvas.Set(input.X+j, input.Y, ch, style)
 			}
 		}
 	}
@@ -1124,7 +1194,7 @@ func (r *Renderer) RenderInputLabels(labels []string) {
 
 // RenderTOC draws a table of contents overlay.
 // Returns jump labels for each heading so the caller can handle selection.
-func (r *Renderer) RenderTOC(labels []string) {
+func (r *Renderer) RenderTOC(labels []string, inputPrefix string) {
 	if len(r.headings) == 0 {
 		return
 	}
@@ -1181,14 +1251,29 @@ func (r *Renderer) RenderTOC(labels []string) {
 			text = text[:maxTextWidth-3] + "..."
 		}
 
-		// Draw label
+		// Check if this label matches the current input prefix
+		matches := strings.HasPrefix(label, inputPrefix)
+
+		// Draw label with typed portion highlighted
 		for j, ch := range label {
-			r.canvas.Set(x+j, y, ch, render.Style{Reverse: true, Bold: true})
+			var style render.Style
+			if !matches && inputPrefix != "" {
+				style = render.Style{Dim: true}
+			} else if j < len(inputPrefix) {
+				style = render.Style{Bold: true, FgColor: render.ColorGreen}
+			} else {
+				style = render.Style{Reverse: true, Bold: true}
+			}
+			r.canvas.Set(x+j, y, ch, style)
 		}
 
-		// Draw section number and text
+		// Draw section number and text (dimmed if not matching)
 		line := fmt.Sprintf(" %s  %s", heading.Number, text)
-		r.canvas.WriteString(x+len(label), y, line, render.Style{})
+		textStyle := render.Style{}
+		if !matches && inputPrefix != "" {
+			textStyle.Dim = true
+		}
+		r.canvas.WriteString(x+len(label), y, line, textStyle)
 
 		y++
 	}
@@ -1200,7 +1285,7 @@ func (r *Renderer) RenderTOC(labels []string) {
 }
 
 // RenderLinkIndex draws a link index overlay showing all page links.
-func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int) {
+func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int, inputPrefix string) {
 	if len(r.links) == 0 {
 		return
 	}
@@ -1242,7 +1327,8 @@ func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int) {
 	y := startY + 2
 	visibleCount := boxHeight - 4
 	for i := scrollOffset; i < len(r.links) && i < scrollOffset+visibleCount; i++ {
-		if i >= len(labels) {
+		labelIdx := i - scrollOffset
+		if labelIdx >= len(labels) {
 			break
 		}
 
@@ -1250,7 +1336,7 @@ func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int) {
 		x := startX + 2
 
 		// Format: [label] text → href
-		label := labels[i]
+		label := labels[labelIdx]
 		text := link.Text
 		if text == "" {
 			text = "(no text)"
@@ -1268,15 +1354,34 @@ func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int) {
 			href = href[:maxHrefWidth-3] + "..."
 		}
 
-		// Draw label (highlighted)
+		// Check if this label matches the current input prefix
+		matches := strings.HasPrefix(label, inputPrefix)
+
+		// Draw label with typed portion highlighted differently
 		for j, ch := range label {
-			r.canvas.Set(x+j, y, ch, render.Style{Reverse: true, Bold: true})
+			var style render.Style
+			if !matches && inputPrefix != "" {
+				// Non-matching label - dim it
+				style = render.Style{Dim: true}
+			} else if j < len(inputPrefix) {
+				// Typed character - bold green to show it's been entered
+				style = render.Style{Bold: true, FgColor: render.ColorGreen}
+			} else {
+				// Remaining characters - reverse video
+				style = render.Style{Reverse: true, Bold: true}
+			}
+			r.canvas.Set(x+j, y, ch, style)
 		}
 
-		// Draw text and href
+		// Draw text and href (dimmed if not matching)
 		line := fmt.Sprintf(" %s ", text)
-		r.canvas.WriteString(x+len(label), y, line, render.Style{})
-		r.canvas.WriteString(x+len(label)+render.StringWidth(line), y, href, render.Style{Dim: true})
+		textStyle := render.Style{}
+		hrefStyle := render.Style{Dim: true}
+		if !matches && inputPrefix != "" {
+			textStyle.Dim = true
+		}
+		r.canvas.WriteString(x+len(label), y, line, textStyle)
+		r.canvas.WriteString(x+len(label)+render.StringWidth(line), y, href, hrefStyle)
 
 		y++
 	}
@@ -1307,7 +1412,7 @@ type NavLink struct {
 
 // RenderNavigation draws a navigation overlay with all nav links.
 // scrollOffset controls which portion of the list is visible.
-func (r *Renderer) RenderNavigation(navSections []*html.Node, labels []string, scrollOffset int) []NavLink {
+func (r *Renderer) RenderNavigation(navSections []*html.Node, labels []string, scrollOffset int, inputPrefix string) []NavLink {
 	if len(navSections) == 0 {
 		return nil
 	}
@@ -1414,22 +1519,39 @@ func (r *Renderer) RenderNavigation(navSections []*html.Node, labels []string, s
 			}
 		}
 
-		// Format: [label] text
-		if linkIndex < len(labels) {
-			label := labels[linkIndex]
+		// Format: [label] text - labels are for visible items only
+		labelIdx := linkIndex - scrollOffset
+		if labelIdx >= 0 && labelIdx < len(labels) {
+			label := labels[labelIdx]
 			text := link.Text
 			maxTextWidth := navWidth - 6 - len(label)
 			if maxTextWidth > 0 && len(text) > maxTextWidth {
 				text = text[:maxTextWidth-3] + "..."
 			}
 
-			// Draw label
+			// Check if this label matches the current input prefix
+			matches := strings.HasPrefix(label, inputPrefix)
+
+			// Draw label with typed portion highlighted
 			for j, ch := range label {
-				r.canvas.Set(x+j, y, ch, render.Style{Reverse: true, Bold: true})
+				var style render.Style
+				if !matches && inputPrefix != "" {
+					style = render.Style{Dim: true}
+				} else if j < len(inputPrefix) {
+					style = render.Style{Bold: true, FgColor: render.ColorGreen}
+				} else {
+					style = render.Style{Reverse: true, Bold: true}
+				}
+				r.canvas.Set(x+j, y, ch, style)
 			}
 
-			// Draw link text
-			r.canvas.WriteString(x+len(label)+1, y, text, render.Style{Underline: true})
+			// Draw link text (dimmed if not matching)
+			textStyle := render.Style{Underline: true}
+			if !matches && inputPrefix != "" {
+				textStyle.Dim = true
+				textStyle.Underline = false
+			}
+			r.canvas.WriteString(x+len(label)+1, y, text, textStyle)
 		}
 
 		y++
