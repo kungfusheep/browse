@@ -38,8 +38,10 @@ func DefaultProvider() Provider {
 // Falls back to DuckDuckGo if the name is unrecognized.
 func ProviderByName(name string) Provider {
 	switch name {
-	case "duckduckgo", "ddg":
+	case "duckduckgo", "ddg", "DuckDuckGo":
 		return NewDuckDuckGo()
+	case "wikipedia", "wiki", "wp", "Wikipedia":
+		return NewWikipedia()
 	default:
 		// Fall back to DuckDuckGo for unknown providers
 		return NewDuckDuckGo()
