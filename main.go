@@ -953,9 +953,21 @@ func run(url string) error {
 
 						newURL := resolveURL(url, links[i].Href)
 
-						// Check if this is an image link - preview with Quick Look
+						// Check if this is an image link - preview with Quick Look gallery
 						if isImageURL(newURL) {
-							go openImagePreview(newURL)
+							// Find all image links on the page
+							allImageURLs := []string{}
+							startIndex := 0
+							for _, link := range links {
+								linkURL := resolveURL(url, link.Href)
+								if isImageURL(linkURL) {
+									allImageURLs = append(allImageURLs, linkURL)
+									if linkURL == newURL {
+										startIndex = len(allImageURLs) - 1
+									}
+								}
+							}
+							go openImageGallery(allImageURLs, startIndex)
 							redraw()
 							break
 						}
@@ -3159,6 +3171,116 @@ func isImageURL(url string) bool {
 		strings.Contains(lower, ".jpeg?") ||
 		strings.Contains(lower, ".gif?") ||
 		strings.Contains(lower, ".webp?")
+}
+
+// openImageGallery downloads multiple images and opens them in Quick Look gallery
+func openImageGallery(imageURLs []string, startIndex int) error {
+	if len(imageURLs) == 0 {
+		return nil
+	}
+
+	// Download all images concurrently
+	type result struct {
+		path string
+		err  error
+		idx  int
+	}
+
+	results := make(chan result, len(imageURLs))
+	for i, imageURL := range imageURLs {
+		go func(url string, idx int) {
+			path, err := downloadImageToTemp(url)
+			results <- result{path, err, idx}
+		}(imageURL, i)
+	}
+
+	// Collect results
+	imagePaths := make([]string, len(imageURLs))
+	for i := 0; i < len(imageURLs); i++ {
+		res := <-results
+		if res.err == nil {
+			imagePaths[res.idx] = res.path
+		}
+	}
+
+	// Filter out failed downloads
+	var validPaths []string
+	for _, path := range imagePaths {
+		if path != "" {
+			validPaths = append(validPaths, path)
+		}
+	}
+
+	if len(validPaths) == 0 {
+		return fmt.Errorf("no images downloaded successfully")
+	}
+
+	// Adjust start index if needed
+	if startIndex >= len(validPaths) {
+		startIndex = 0
+	}
+
+	// Reorder so the selected image is first (qlmanage opens the first one)
+	if startIndex > 0 && startIndex < len(validPaths) {
+		reordered := append([]string{validPaths[startIndex]}, validPaths[:startIndex]...)
+		reordered = append(reordered, validPaths[startIndex+1:]...)
+		validPaths = reordered
+	}
+
+	// Open all images with Quick Look
+	cmd := exec.Command("qlmanage", append([]string{"-p"}, validPaths...)...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Start()
+
+	// Activate Quick Look
+	time.Sleep(100 * time.Millisecond)
+	activateScript := `tell application "System Events" to set frontmost of first process whose name is "qlmanage" to true`
+	exec.Command("osascript", "-e", activateScript).Run()
+
+	// Clean up temp files after delay
+	go func() {
+		time.Sleep(60 * time.Second)
+		for _, path := range validPaths {
+			os.Remove(path)
+		}
+	}()
+
+	return nil
+}
+
+// downloadImageToTemp downloads an image and saves to a temp file
+func downloadImageToTemp(imageURL string) (string, error) {
+	resp, err := http.Get(imageURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	// Determine extension
+	ext := ".png"
+	lower := strings.ToLower(imageURL)
+	if strings.Contains(lower, ".jpg") || strings.Contains(lower, ".jpeg") {
+		ext = ".jpg"
+	} else if strings.Contains(lower, ".gif") {
+		ext = ".gif"
+	} else if strings.Contains(lower, ".webp") {
+		ext = ".webp"
+	}
+
+	tmpFile, err := os.CreateTemp("", "browse_preview_*"+ext)
+	if err != nil {
+		return "", err
+	}
+	defer tmpFile.Close()
+
+	_, err = io.Copy(tmpFile, resp.Body)
+	if err != nil {
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+
+	return tmpFile.Name(), nil
 }
 
 // openImagePreview downloads an image and opens it with Quick Look

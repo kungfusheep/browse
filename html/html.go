@@ -380,10 +380,22 @@ func extractContentOnly(n *html.Node, parent *Node) {
 				// Standalone link (not inside a paragraph) - treat as a paragraph with a link
 				href := getAttr(c, "href")
 				text := strings.TrimSpace(textContent(c))
-				// If no text, use the href as display text
+
+				// If no text, check for img alt text (for image links)
+				if text == "" {
+					if imgNode := findChildImg(c); imgNode != nil {
+						altText := getAttr(imgNode, "alt")
+						if altText != "" {
+							text = "[" + altText + "]"
+						}
+					}
+				}
+
+				// If still no text, use the href as display text
 				if text == "" && href != "" {
 					text = href
 				}
+
 				if text != "" && href != "" {
 					node := &Node{Type: NodeParagraph}
 					link := &Node{Type: NodeLink, Href: href}
@@ -1088,6 +1100,20 @@ func textContentDeduped(n *html.Node) string {
 		}
 	}
 	return strings.Join(result, " ")
+}
+
+// findChildImg looks for an img element as a direct or nested child.
+func findChildImg(n *html.Node) *html.Node {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "img" {
+			return c
+		}
+		// Check nested elements (e.g., <a><span><img></span></a>)
+		if found := findChildImg(c); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func getAttr(n *html.Node, key string) string {
