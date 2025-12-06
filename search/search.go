@@ -42,6 +42,20 @@ func ProviderByName(name string) Provider {
 		return NewDuckDuckGo()
 	case "wikipedia", "wiki", "wp", "Wikipedia":
 		return NewWikipedia()
+	case "github", "gh", "GitHub":
+		return NewGitHub()
+	case "hackernews", "hn", "Hacker News":
+		return NewHackerNews()
+	case "pkggodev", "go", "pkg.go.dev":
+		return NewPkgGoDev()
+	case "archwiki", "arch", "Arch Wiki":
+		return NewArchWiki()
+	case "mdn", "MDN Web Docs":
+		return NewMDN()
+	case "manpages", "man", "Man Pages":
+		return NewManPages()
+	case "wiktionary", "dict", "Wiktionary":
+		return NewWiktionary()
 	default:
 		// Fall back to DuckDuckGo for unknown providers
 		return NewDuckDuckGo()

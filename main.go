@@ -880,25 +880,60 @@ func run(url string) error {
 				}
 			}
 
-			// Draw border
-			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
-
-			// Title
+			// Check if input starts with a known prefix
 			title := " Omnibox "
-			titleX := startX + (boxWidth-len(title))/2
-			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+			var matchedPrefix string
+			var matchedDisplay string
+			inputLower := strings.ToLower(omniInput)
+			for _, pfx := range omniParser.Prefixes() {
+				for _, name := range pfx.Names {
+					// Check for "prefix " or just "prefix" at start
+					if strings.HasPrefix(inputLower, name+" ") || inputLower == name {
+						matchedPrefix = name
+						matchedDisplay = pfx.Display
+						title = " " + pfx.Display + " "
+						break
+					}
+				}
+				if matchedPrefix != "" {
+					break
+				}
+			}
 
-			// Input field
+			// Draw border - green when prefix matched
+			boxStyle := render.Style{}
+			titleStyle := render.Style{Bold: true}
+			if matchedPrefix != "" {
+				boxStyle = render.Style{FgColor: render.ColorGreen}
+				titleStyle = render.Style{Bold: true, FgColor: render.ColorGreen}
+			}
+			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, boxStyle)
+
+			titleX := startX + (boxWidth-len(title))/2
+			canvas.WriteString(titleX, startY, title, titleStyle)
+
+			// Input field with prefix highlighting
 			inputY := startY + 2
 			maxInputWidth := boxWidth - 4
 			displayInput := omniInput
 			if len(displayInput) > maxInputWidth-1 {
 				displayInput = displayInput[len(displayInput)-maxInputWidth+1:]
 			}
-			canvas.WriteString(startX+2, inputY, displayInput+"█", render.Style{})
 
-			// Prefix hints
-			prefixHint := "wp <query>  ddg <query>"
+			if matchedPrefix != "" && len(omniInput) >= len(matchedPrefix) {
+				// Draw prefix in green/bold, rest in normal style
+				prefixLen := len(matchedPrefix)
+				canvas.WriteString(startX+2, inputY, omniInput[:prefixLen], render.Style{Bold: true, FgColor: render.ColorGreen})
+				canvas.WriteString(startX+2+prefixLen, inputY, omniInput[prefixLen:]+"█", render.Style{})
+			} else {
+				canvas.WriteString(startX+2, inputY, displayInput+"█", render.Style{})
+			}
+
+			// Prefix hints - dim the matched one
+			prefixHint := "gh  hn  go  arch  mdn  man  dict  wp  ddg"
+			if matchedDisplay != "" {
+				prefixHint = "Searching " + matchedDisplay
+			}
 			if len(prefixHint) > boxWidth-4 {
 				prefixHint = prefixHint[:boxWidth-7] + "..."
 			}
@@ -906,6 +941,9 @@ func run(url string) error {
 
 			// Hint
 			hint := " URL, prefix:query, or search term "
+			if matchedDisplay != "" {
+				hint = " Enter search query "
+			}
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
@@ -2194,7 +2232,7 @@ func run(url string) error {
 				redraw()
 			}
 
-		case key(buf[0], kb.OpenUrl): // open URL
+		case key(buf[0], kb.OpenUrl) && !gPending: // open URL
 			urlMode = true
 			urlInput = ""
 			redraw()
@@ -2416,6 +2454,21 @@ func run(url string) error {
 			gPending = false
 			scrollY = 0
 			redraw()
+
+		case keyG(buf[0], kb.OpenInBrowser): // go - open in default browser
+			gPending = false
+			if url != "" && url != "browse://home" {
+				if err := openInBrowser(url); err == nil {
+					// Brief feedback
+					canvas.Clear()
+					renderer.Render(doc, scrollY)
+					statusY := height - 1
+					canvas.WriteString(0, statusY, "Opened in browser", render.Style{Bold: true})
+					canvas.RenderTo(os.Stdout)
+					time.Sleep(500 * time.Millisecond)
+				}
+				redraw()
+			}
 
 		case buf[0] == 'g' && !gPending:
 			// Start g-prefix mode
@@ -2903,6 +2956,22 @@ func copyToClipboard(text string) error {
 	return cmd.Run()
 }
 
+// openInBrowser opens the URL in the default system browser.
+func openInBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default:
+		return fmt.Errorf("browser opening not supported on %s", runtime.GOOS)
+	}
+	return cmd.Start() // Don't wait for browser to close
+}
+
 func landingPage(favStore *favourites.Store) (*html.Document, error) {
 	// Build favourites section if we have any
 	var favouritesSection string
@@ -2937,6 +3006,7 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <strong>o</strong> - open URL |
 <strong>/</strong> - web search |
 <strong>y</strong> - copy URL |
+<strong>go</strong> - open in browser |
 <strong>E</strong> - edit in $EDITOR |
 <strong>f</strong> - follow link |
 <strong>t</strong> - table of contents |

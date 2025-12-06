@@ -36,6 +36,41 @@ func DefaultPrefixes() []Prefix {
 			Display:  "Wikipedia",
 			Internal: true,
 		},
+		{
+			Names:    []string{"gh", "github"},
+			Display:  "GitHub",
+			Internal: true,
+		},
+		{
+			Names:    []string{"hn", "hackernews"},
+			Display:  "Hacker News",
+			Internal: true,
+		},
+		{
+			Names:    []string{"go", "pkg"},
+			Display:  "pkg.go.dev",
+			Internal: true,
+		},
+		{
+			Names:    []string{"arch", "archwiki"},
+			Display:  "Arch Wiki",
+			Internal: true,
+		},
+		{
+			Names:    []string{"mdn"},
+			Display:  "MDN Web Docs",
+			Internal: true,
+		},
+		{
+			Names:    []string{"man", "manpages"},
+			Display:  "Man Pages",
+			Internal: true,
+		},
+		{
+			Names:    []string{"dict", "wiktionary"},
+			Display:  "Wiktionary",
+			Internal: true,
+		},
 	}
 }
 

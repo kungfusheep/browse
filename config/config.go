@@ -62,11 +62,12 @@ type Keybindings struct {
 	NextSection   string `json:"nextSection"`
 
 	// Actions
-	OpenUrl string `json:"openUrl"`
-	Find    string `json:"find"` // find in page
-	CopyUrl string `json:"copyUrl"`
-	EditInEditor string `json:"editInEditor"`
-	FollowLink   string `json:"followLink"`
+	OpenUrl       string `json:"openUrl"`
+	OpenInBrowser string `json:"openInBrowser"` // open current page in default browser
+	Find          string `json:"find"`          // find in page
+	CopyUrl       string `json:"copyUrl"`
+	EditInEditor  string `json:"editInEditor"`
+	FollowLink    string `json:"followLink"`
 
 	// Overlays
 	TableOfContents string `json:"tableOfContents"`
@@ -144,9 +145,10 @@ func Default() *Config {
 			NextParagraph:      "]",
 			PrevSection:        "{",
 			NextSection:        "}",
-			OpenUrl: "o",
-			Find:    "/",
-			CopyUrl: "y",
+			OpenUrl:       "o",
+			OpenInBrowser: "go",
+			Find:          "/",
+			CopyUrl:       "y",
 			EditInEditor:       "E",
 			FollowLink:         "f",
 			TableOfContents:    "t",
@@ -295,6 +297,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.PrevSection, user.Keybindings.PrevSection)
 	mergeKeybinding(&result.Keybindings.NextSection, user.Keybindings.NextSection)
 	mergeKeybinding(&result.Keybindings.OpenUrl, user.Keybindings.OpenUrl)
+	mergeKeybinding(&result.Keybindings.OpenInBrowser, user.Keybindings.OpenInBrowser)
 	mergeKeybinding(&result.Keybindings.Find, user.Keybindings.Find)
 	mergeKeybinding(&result.Keybindings.CopyUrl, user.Keybindings.CopyUrl)
 	mergeKeybinding(&result.Keybindings.EditInEditor, user.Keybindings.EditInEditor)
@@ -394,7 +397,8 @@ keybindings = new {
 
   // Actions
   openUrl = "o"
-  find = "/"      // find in page
+  openInBrowser = "go"  // open current page in default browser
+  find = "/"            // find in page
   copyUrl = "y"
   editInEditor = "E"
   followLink = "f"

@@ -216,3 +216,23 @@ func cleanText(s string) string {
 	s = re.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
 }
+
+// getAttr gets an attribute value from a node.
+func getAttr(n *html.Node, key string) string {
+	for _, attr := range n.Attr {
+		if attr.Key == key {
+			return attr.Val
+		}
+	}
+	return ""
+}
+
+// hasClassContaining checks if a node has a class containing the given substring.
+func hasClassContaining(n *html.Node, substr string) bool {
+	for _, attr := range n.Attr {
+		if attr.Key == "class" && strings.Contains(attr.Val, substr) {
+			return true
+		}
+	}
+	return false
+}
