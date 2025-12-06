@@ -952,6 +952,14 @@ func run(url string) error {
 						jumpInput = ""
 
 						newURL := resolveURL(url, links[i].Href)
+
+						// Check if this is an image link - preview with Quick Look
+						if isImageURL(newURL) {
+							go openImagePreview(newURL)
+							redraw()
+							break
+						}
+
 						// Check if this is a same-page anchor link
 						if isSamePageLink(url, newURL) {
 							hash := extractHash(newURL)
@@ -3136,4 +3144,74 @@ func searchWithSpinner(canvas *render.Canvas, provider search.Provider, query st
 		return searchResult{results, err}
 	})
 	return result.results, result.err
+}
+
+// isImageURL checks if a URL points to an image file
+func isImageURL(url string) bool {
+	lower := strings.ToLower(url)
+	return strings.HasSuffix(lower, ".png") ||
+		strings.HasSuffix(lower, ".jpg") ||
+		strings.HasSuffix(lower, ".jpeg") ||
+		strings.HasSuffix(lower, ".gif") ||
+		strings.HasSuffix(lower, ".webp") ||
+		strings.Contains(lower, ".png?") ||
+		strings.Contains(lower, ".jpg?") ||
+		strings.Contains(lower, ".jpeg?") ||
+		strings.Contains(lower, ".gif?") ||
+		strings.Contains(lower, ".webp?")
+}
+
+// openImagePreview downloads an image and opens it with Quick Look
+func openImagePreview(imageURL string) error {
+	// Download the image
+	resp, err := http.Get(imageURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Save to temp file with proper extension
+	ext := ".png"
+	if strings.Contains(strings.ToLower(imageURL), ".jpg") || strings.Contains(strings.ToLower(imageURL), ".jpeg") {
+		ext = ".jpg"
+	} else if strings.Contains(strings.ToLower(imageURL), ".gif") {
+		ext = ".gif"
+	} else if strings.Contains(strings.ToLower(imageURL), ".webp") {
+		ext = ".webp"
+	}
+
+	tmpFile, err := os.CreateTemp("", "browse_preview_*"+ext)
+	if err != nil {
+		return err
+	}
+	defer tmpFile.Close()
+
+	// Copy image data to temp file
+	_, err = io.Copy(tmpFile, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	tmpPath := tmpFile.Name()
+
+	// Open with Quick Look and force it to front
+	cmd := exec.Command("qlmanage", "-p", tmpPath)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Start()
+
+	// Give qlmanage a moment to start, then activate it
+	time.Sleep(100 * time.Millisecond)
+
+	// Activate Quick Look window using AppleScript
+	activateScript := `tell application "System Events" to set frontmost of first process whose name is "qlmanage" to true`
+	exec.Command("osascript", "-e", activateScript).Run()
+
+	// Clean up temp file after delay
+	go func() {
+		time.Sleep(60 * time.Second)
+		os.Remove(tmpPath)
+	}()
+
+	return nil
 }
