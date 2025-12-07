@@ -13,6 +13,8 @@ type Result struct {
 	IsSearch        bool   // Whether this is a search (vs direct navigation)
 	UseInternal     bool   // Use internal search provider (like / search)
 	Provider        string // The search provider used (if IsSearch)
+	IsAISummary     bool   // Whether this is an AI summary request
+	AIPrompt        string // Optional custom prompt for AI (empty = default summary)
 }
 
 // Prefix represents a search prefix configuration.
@@ -71,6 +73,11 @@ func DefaultPrefixes() []Prefix {
 			Display:  "Wiktionary",
 			Internal: true,
 		},
+		{
+			Names:    []string{"ai", "sum", "summary"},
+			Display:  "AI Summary",
+			Internal: true,
+		},
 	}
 }
 
@@ -108,6 +115,19 @@ func (p *Parser) Parse(input string) Result {
 	// Check for URL schemes first
 	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
 		return Result{URL: input, IsSearch: false}
+	}
+
+	// Check for AI summary prefixes
+	inputLower := strings.ToLower(input)
+	if inputLower == "sum" || inputLower == "ai" || inputLower == "summary" {
+		return Result{IsAISummary: true, Provider: "AI Summary"}
+	}
+	// AI with custom prompt: "ai <question>" or "sum <question>"
+	for _, aiPrefix := range []string{"ai ", "sum ", "summary "} {
+		if strings.HasPrefix(inputLower, aiPrefix) {
+			prompt := strings.TrimSpace(input[len(aiPrefix):])
+			return Result{IsAISummary: true, AIPrompt: prompt, Provider: "AI Summary"}
+		}
 	}
 
 	// Check for search prefixes (e.g., "wp cats" or "wiki hello world")

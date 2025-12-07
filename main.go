@@ -22,6 +22,7 @@ import (
 	"browse/fetcher"
 	"browse/html"
 	"browse/inspector"
+	"browse/lineedit"
 	"browse/llm"
 	"browse/omnibox"
 	"browse/render"
@@ -218,12 +219,25 @@ func run(url string) error {
 	// Store raw HTML for rule generation
 	var currentHTML string
 
+	// AI chat session - holds conversation context for ai:// pages
+	type chatMessage struct {
+		Role    string // "user" or "assistant"
+		Content string
+	}
+	type chatSession struct {
+		SourceURL     string        // Original page URL
+		SourceContent string        // Original page content (plain text)
+		Messages      []chatMessage // Conversation history (summary is first assistant message)
+		SessionID     string        // Claude Code session ID for conversation continuity
+	}
+
 	// Page state for history
 	type pageState struct {
 		url     string
 		doc     *html.Document
 		scrollY int
-		html    string // raw HTML for rule generation
+		html    string       // raw HTML for rule generation
+		chat    *chatSession // AI chat session (nil for regular pages)
 	}
 
 	// Buffers - vim-style tabs, each with its own history
@@ -369,7 +383,14 @@ func run(url string) error {
 	var enteredText string                      // text being entered
 	var urlInput string                         // URL being entered
 	var omniInput string                        // omnibox input being entered
-	var structureViewer *inspector.Viewer // DOM structure viewer
+	var structureViewer *inspector.Viewer       // DOM structure viewer
+	chatEditor := lineedit.New()                         // chat input editor (for ai:// pages)
+	var chatScheme lineedit.KeyScheme                    // keybinding scheme (from config)
+	if cfg.Editor.Scheme == "vim" {
+		chatScheme = lineedit.NewVimScheme()
+	} else {
+		chatScheme = lineedit.NewEmacsScheme()
+	}
 	omniParser := omnibox.NewParser()     // omnibox input parser
 
 	// Favourites mode state (favStore loaded at start of run())
@@ -418,6 +439,104 @@ func run(url string) error {
 			maxScroll = 0
 		}
 		scrollY = 0
+	}
+
+	// chatToHTML renders an AI chat session as a full HTML page
+	chatToHTML := func(chat *chatSession, editor *lineedit.Editor) string {
+		var msgHTML strings.Builder
+		for _, msg := range chat.Messages {
+			if msg.Role == "user" {
+				// User messages in a distinct style
+				escaped := strings.ReplaceAll(msg.Content, "<", "&lt;")
+				escaped = strings.ReplaceAll(escaped, ">", "&gt;")
+				msgHTML.WriteString(fmt.Sprintf(`<blockquote><strong>You:</strong> %s</blockquote>`, escaped))
+			} else {
+				// Assistant messages render as HTML
+				msgHTML.WriteString(msg.Content)
+			}
+			msgHTML.WriteString("\n<hr>\n")
+		}
+
+		// Build input with cursor at correct position
+		escapeHTML := func(s string) string {
+			s = strings.ReplaceAll(s, "&", "&amp;")
+			s = strings.ReplaceAll(s, "<", "&lt;")
+			s = strings.ReplaceAll(s, ">", "&gt;")
+			return s
+		}
+		beforeCursor := escapeHTML(editor.BeforeCursor())
+		afterCursor := escapeHTML(editor.AfterCursor())
+		// Include padding lines below input to ensure it's visible when scrolled to bottom
+		inputPrompt := fmt.Sprintf(`<p><strong>&gt;</strong> %s█%s</p>
+<p>&nbsp;</p>
+<p>&nbsp;</p>
+<p>&nbsp;</p>`, beforeCursor, afterCursor)
+
+		return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>AI Chat</title></head>
+<body>
+<article>
+<h1>AI Chat</h1>
+<p><em>Source: <a href="%s">%s</a></em></p>
+<hr>
+%s
+%s
+</article>
+</body>
+</html>`, chat.SourceURL, chat.SourceURL, msgHTML.String(), inputPrompt)
+	}
+
+	// generateChatResponseInline generates a response without modal spinner (for inline updates)
+	generateChatResponseInline := func(chat *chatSession, userMessage string) string {
+		if llmClient == nil || !llmClient.Available() {
+			return "<p>AI not available. Please configure an LLM provider (ANTHROPIC_API_KEY).</p>"
+		}
+
+		ctx := context.Background()
+
+		// If we have a session ID, use ContinueSession for seamless conversation
+		if chat.SessionID != "" {
+			wrappedMessage := userMessage + "\n\n(Remember: output as clean HTML using only <h2>, <h3>, <p>, <ul>, <li>, <ol>, <strong>, <em>, <blockquote>. No markdown.)"
+			response, err := llmClient.ContinueSession(ctx, chat.SessionID, "", wrappedMessage)
+			if err != nil {
+				return "<p>Error: " + err.Error() + "</p>"
+			}
+			return response
+		}
+
+		// Fallback: build context in prompt
+		var conversationContext strings.Builder
+		conversationContext.WriteString("Previous conversation:\n\n")
+		for _, msg := range chat.Messages {
+			if msg.Role == "user" {
+				conversationContext.WriteString("User: " + msg.Content + "\n\n")
+			} else {
+				conversationContext.WriteString("Assistant: [previous response]\n\n")
+			}
+		}
+
+		sourceContent := chat.SourceContent
+		maxContent := 80000
+		if len(sourceContent) > maxContent {
+			sourceContent = sourceContent[:maxContent] + "\n\n[Content truncated...]"
+		}
+
+		system := `You are a helpful assistant discussing a web page with the user.
+Answer thoughtfully and conversationally. Draw on specific details from the page when relevant.
+Output as clean HTML using only: <h2>, <h3>, <p>, <ul>, <li>, <ol>, <strong>, <em>, <blockquote>. No markdown.`
+
+		userPrompt := fmt.Sprintf(`Page content:
+%s
+
+%s
+User's question: %s`, sourceContent, conversationContext.String(), userMessage)
+
+		response, err := llmClient.CompleteWithSystem(ctx, system, userPrompt)
+		if err != nil {
+			return "<p>Error: " + err.Error() + "</p>"
+		}
+		return response
 	}
 
 	// Handle terminal resize
@@ -930,7 +1049,7 @@ func run(url string) error {
 			}
 
 			// Prefix hints - dim the matched one
-			prefixHint := "gh  hn  go  arch  mdn  man  dict  wp  ddg"
+			prefixHint := "ai  gh  hn  go  arch  mdn  man  dict  wp"
 			if matchedDisplay != "" {
 				prefixHint = "Searching " + matchedDisplay
 			}
@@ -947,6 +1066,7 @@ func run(url string) error {
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
+
 		canvas.RenderTo(os.Stdout)
 	}
 
@@ -1061,6 +1181,127 @@ func run(url string) error {
 				}
 			}
 			continue
+		}
+
+		// AI Chat input handling (when on ai:// page with active chat)
+		if strings.HasPrefix(url, "ai://") && getCurrentBuffer().current.chat != nil {
+			chat := getCurrentBuffer().current.chat
+
+			// Helper to update the chat display
+			updateChatDisplay := func() {
+				chatHTML := chatToHTML(chat, chatEditor)
+				if chatDoc, err := html.ParseString(chatHTML); err == nil {
+					getCurrentBuffer().current.doc = chatDoc
+					getCurrentBuffer().current.html = chatHTML
+					doc = chatDoc
+					currentHTML = chatHTML
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					scrollY = maxScroll
+				}
+				redraw()
+			}
+
+			// Let the keybinding scheme handle the input
+			event := chatScheme.HandleKey(chatEditor, buf[:n], n)
+
+			if event.TextChanged {
+				updateChatDisplay()
+			}
+
+			if event.Cancel {
+				chatEditor.Clear()
+				histBuf := getCurrentBuffer()
+				if len(histBuf.history) > 0 {
+					histBuf.current.scrollY = scrollY
+					histBuf.forward = append(histBuf.forward, histBuf.current)
+					histBuf.current = histBuf.history[len(histBuf.history)-1]
+					histBuf.history = histBuf.history[:len(histBuf.history)-1]
+					if histBuf.current.doc == nil {
+						histBuf.current.doc, _ = fetchAndParse(histBuf.current.url)
+					}
+					doc = histBuf.current.doc
+					url = histBuf.current.url
+					scrollY = histBuf.current.scrollY
+					currentHTML = histBuf.current.html
+					if doc != nil {
+						contentHeight = renderer.ContentHeight(doc)
+						maxScroll = contentHeight - height
+						if maxScroll < 0 {
+							maxScroll = 0
+						}
+					}
+				}
+				redraw()
+				continue
+			}
+
+			if event.Submit && chatEditor.Len() > 0 {
+				userMessage := chatEditor.Text()
+				chatEditor.Clear()
+
+				// Add user message to chat
+				chat.Messages = append(chat.Messages, chatMessage{Role: "user", Content: userMessage})
+
+				// Add animated loading placeholder
+				thinkingIdx := len(chat.Messages)
+				waveFrames := []string{
+					"▁▂▃▄▅▆▇█", "▂▃▄▅▆▇█▇", "▃▄▅▆▇█▇▆", "▄▅▆▇█▇▆▅",
+					"▅▆▇█▇▆▅▄", "▆▇█▇▆▅▄▃", "▇█▇▆▅▄▃▂", "█▇▆▅▄▃▂▁",
+					"▇▆▅▄▃▂▁▂", "▆▅▄▃▂▁▂▃", "▅▄▃▂▁▂▃▄", "▄▃▂▁▂▃▄▅",
+					"▃▂▁▂▃▄▅▆", "▂▁▂▃▄▅▆▇", "▁▂▃▄▅▆▇█",
+				}
+				frameIdx := 0
+				chat.Messages = append(chat.Messages, chatMessage{Role: "assistant", Content: fmt.Sprintf("<p>%s</p>", waveFrames[0])})
+
+				updateLoading := func() {
+					chatHTML := chatToHTML(chat, chatEditor)
+					if chatDoc, err := html.ParseString(chatHTML); err == nil {
+						getCurrentBuffer().current.doc = chatDoc
+						getCurrentBuffer().current.html = chatHTML
+						doc = chatDoc
+						currentHTML = chatHTML
+						contentHeight = renderer.ContentHeight(doc)
+						maxScroll = contentHeight - height
+						if maxScroll < 0 {
+							maxScroll = 0
+						}
+						scrollY = maxScroll
+					}
+					redraw()
+				}
+				updateLoading()
+
+				responseCh := make(chan string, 1)
+				go func() {
+					responseCh <- generateChatResponseInline(chat, userMessage)
+				}()
+
+				ticker := time.NewTicker(80 * time.Millisecond)
+			animationLoop:
+				for {
+					select {
+					case response := <-responseCh:
+						ticker.Stop()
+						chat.Messages[thinkingIdx] = chatMessage{Role: "assistant", Content: response}
+						updateLoading()
+						break animationLoop
+					case <-ticker.C:
+						frameIdx = (frameIdx + 1) % len(waveFrames)
+						chat.Messages[thinkingIdx] = chatMessage{Role: "assistant", Content: fmt.Sprintf("<p>%s</p>", waveFrames[frameIdx])}
+						updateLoading()
+					}
+				}
+				continue
+			}
+
+			if event.Consumed {
+				continue // Key was handled by scheme
+			}
+			// Key not consumed - fall through for navigation handling
 		}
 
 		// Input selection mode handling
@@ -1744,6 +1985,48 @@ func run(url string) error {
 					// Parse the input: URL, prefix:query, or plain search
 					result := omniParser.Parse(input)
 
+					// AI Summary request
+					if result.IsAISummary {
+						// Get page content for summary
+						fullHeight := contentHeight + 10
+						if fullHeight < height {
+							fullHeight = height
+						}
+						summaryCanvas := render.NewCanvas(width, fullHeight)
+						summaryRenderer := document.NewRendererWide(summaryCanvas, wideMode)
+						summaryRenderer.Render(doc, 0)
+						pageContent := summaryCanvas.PlainText()
+						sourceURL := url // capture before navigation
+
+						// Generate summary with LLM
+						prompt := result.AIPrompt
+						if prompt == "" {
+							prompt = "Summarize this page. What is it about, what are the key points, and what's the takeaway?"
+						}
+						summary, sessionID := generateAISummary(llmClient, canvas, pageContent, prompt)
+						if summary != "" {
+							// Create chat session with summary as first assistant message
+							chat := &chatSession{
+								SourceURL:     sourceURL,
+								SourceContent: pageContent,
+								Messages: []chatMessage{
+									{Role: "assistant", Content: summary},
+								},
+								SessionID: sessionID,
+							}
+							// Create HTML page from conversation and navigate to it
+							chatHTML := chatToHTML(chat, chatEditor)
+							chatDoc, err := html.ParseString(chatHTML)
+							if err == nil {
+								navigateTo("ai://chat", chatDoc, chatHTML)
+								getCurrentBuffer().current.chat = chat
+								chatEditor.Clear()
+							}
+						}
+						redraw()
+						continue
+					}
+
 					if result.UseInternal {
 						// Use internal search provider
 						provider := search.ProviderByName(result.Provider)
@@ -2087,6 +2370,152 @@ func run(url string) error {
 					redraw()
 				}
 			}
+
+		case key(buf[0], kb.AISummary): // AI summary
+			// Get page content for summary
+			fullHeight := contentHeight + 10
+			if fullHeight < height {
+				fullHeight = height
+			}
+			summaryCanvas := render.NewCanvas(width, fullHeight)
+			summaryRenderer := document.NewRendererWide(summaryCanvas, wideMode)
+			summaryRenderer.Render(doc, 0)
+			pageContent := summaryCanvas.PlainText()
+			sourceURL := url // capture before navigation
+
+			// Generate summary with LLM
+			summary, sessionID := generateAISummary(llmClient, canvas, pageContent, "Summarize this page. What is it about, what are the key points, and what's the takeaway?")
+			if summary != "" {
+				// Create chat session with summary as first assistant message
+				chat := &chatSession{
+					SourceURL:     sourceURL,
+					SourceContent: pageContent,
+					Messages: []chatMessage{
+						{Role: "assistant", Content: summary},
+					},
+					SessionID: sessionID,
+				}
+				// Create HTML page from conversation and navigate to it
+				chatHTML := chatToHTML(chat, chatEditor)
+				chatDoc, err := html.ParseString(chatHTML)
+				if err == nil {
+					navigateTo("ai://chat", chatDoc, chatHTML)
+					getCurrentBuffer().current.chat = chat
+					chatEditor.Clear()
+				}
+			}
+			redraw()
+
+		case key(buf[0], kb.EditorSandbox): // Editor sandbox for testing keybinding schemes
+			// Build sandbox page showing current scheme with toggle instructions
+			sandboxEditor := lineedit.New()
+			sandboxEditor.Set("Type here to test the editor...")
+			sandboxEditor.End()
+
+			// Track which scheme is active in sandbox
+			sandboxScheme := chatScheme // Start with current global scheme
+
+			sandboxHTML := func() string {
+				schemeName := sandboxScheme.Name()
+				modeInfo := ""
+				if vim, ok := sandboxScheme.(*lineedit.VimScheme); ok {
+					if vim.InInsertMode() {
+						modeInfo = " (INSERT)"
+					} else {
+						modeInfo = " (NORMAL)"
+					}
+				}
+				return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Editor Sandbox</title></head>
+<body>
+<article>
+<h1>Editor Sandbox</h1>
+<p>Test your keybinding scheme here.</p>
+<hr>
+<h2>Current Scheme: %s%s</h2>
+<p>Press <strong>Tab</strong> to toggle between emacs/vim</p>
+<p>Press <strong>Escape</strong> to exit sandbox</p>
+<hr>
+<h3>Input</h3>
+<p><strong>&gt;</strong> %s█%s</p>
+<p>&nbsp;</p>
+<hr>
+<h3>Keybindings</h3>
+<p><strong>Emacs:</strong> Ctrl+A/E (home/end), Ctrl+F/B (char), Alt+F/B (word), Ctrl+K/U (kill), Ctrl+W (del word)</p>
+<p><strong>Vim Normal:</strong> h/l (char), w/b (word), 0/$ (home/end), x/X/D (delete), i/a/I/A (insert)</p>
+<p><strong>Vim Insert:</strong> Type normally, Escape to return to normal mode</p>
+</article>
+</body>
+</html>`, schemeName, modeInfo,
+					strings.ReplaceAll(sandboxEditor.BeforeCursor(), "<", "&lt;"),
+					strings.ReplaceAll(sandboxEditor.AfterCursor(), "<", "&lt;"))
+			}
+
+			// Navigate to sandbox
+			sandboxDoc, _ := html.ParseString(sandboxHTML())
+			navigateTo("editor://sandbox", sandboxDoc, sandboxHTML())
+			redraw()
+
+			// Sandbox input loop
+			sandboxBuf := make([]byte, 3)
+			for {
+				sn, _ := os.Stdin.Read(sandboxBuf)
+				if sn == 0 {
+					continue
+				}
+
+				// Tab to toggle scheme
+				if sandboxBuf[0] == '\t' {
+					if sandboxScheme.Name() == "emacs" {
+						sandboxScheme = lineedit.NewVimScheme()
+					} else {
+						sandboxScheme = lineedit.NewEmacsScheme()
+					}
+					// Update global scheme too
+					chatScheme = sandboxScheme
+				} else {
+					// Let scheme handle the key
+					event := sandboxScheme.HandleKey(sandboxEditor, sandboxBuf[:sn], sn)
+
+					if event.Cancel {
+						break // Exit sandbox
+					}
+				}
+
+				// Update display
+				newHTML := sandboxHTML()
+				sandboxDoc, _ = html.ParseString(newHTML)
+				getCurrentBuffer().current.doc = sandboxDoc
+				getCurrentBuffer().current.html = newHTML
+				doc = sandboxDoc
+				currentHTML = newHTML
+				contentHeight = renderer.ContentHeight(doc)
+				maxScroll = contentHeight - height
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				redraw()
+			}
+
+			// Restore previous page
+			histBuf := getCurrentBuffer()
+			if len(histBuf.history) > 0 {
+				histBuf.current = histBuf.history[len(histBuf.history)-1]
+				histBuf.history = histBuf.history[:len(histBuf.history)-1]
+				doc = histBuf.current.doc
+				url = histBuf.current.url
+				scrollY = histBuf.current.scrollY
+				currentHTML = histBuf.current.html
+				if doc != nil {
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+				}
+			}
+			redraw()
 
 		case key(buf[0], kb.Back): // back in history (within current buffer)
 			buf := getCurrentBuffer()
@@ -3406,4 +3835,62 @@ func openImagePreview(imageURL string) error {
 	}()
 
 	return nil
+}
+
+
+// generateAISummary uses the LLM to generate a summary of page content.
+// Returns the summary HTML and a session ID for conversation continuity.
+func generateAISummary(llmClient *llm.Client, canvas *render.Canvas, pageContent, prompt string) (string, string) {
+	if llmClient == nil || !llmClient.Available() {
+		return "<p>AI summary not available. Please configure an LLM provider (ANTHROPIC_API_KEY).</p>", ""
+	}
+
+	// Truncate content if too long (to stay within token limits)
+	// Claude can handle ~200k tokens, so 100k chars (~25k tokens) is safe
+	maxContent := 100000
+	if len(pageContent) > maxContent {
+		pageContent = pageContent[:maxContent] + "\n\n[Content truncated...]"
+	}
+
+	var sessionID string
+
+	// Show loading spinner
+	result := withSpinner(canvas, "Generating summary...", func(ctx context.Context) string {
+		system := `You summarize web pages with clarity first, insight second. The user may ask follow-up questions about this content.
+
+Structure your summary as a gradient:
+
+**First, the facts** (what they asked for):
+- What this content is about
+- The key points, arguments, or information
+- What conclusions or claims it makes
+
+**Then, the insight** (the bit that makes it worth reading):
+- What's genuinely interesting or surprising here
+- The angle most readers might miss
+- How this connects to something bigger
+- Your honest take on what makes this notable (or not)
+
+The factual section should feel reliable and complete. The insight section should feel like a sharp friend pointing out what you might have overlooked.
+
+Keep it concise - aim for the facts in 2-3 paragraphs, then the insight in 1-2 paragraphs. Use a heading like "The Angle" or "What's Actually Interesting" to mark the transition.
+
+Output as clean HTML using only: <h2>, <h3>, <p>, <ul>, <li>, <ol>, <strong>, <em>, <blockquote>
+Do NOT include <html>, <head>, <body>, or <article> tags.`
+
+		userPrompt := prompt + "\n\nContent to summarize:\n\n" + pageContent
+
+		// Use session-based API to enable follow-up questions
+		summary, sid, err := llmClient.StartSession(ctx, system, userPrompt)
+		if err != nil {
+			if err == llm.ErrNoProvider {
+				return "<p>No LLM provider available. Please set ANTHROPIC_API_KEY.</p>"
+			}
+			return "<p>Error generating summary: " + err.Error() + "</p>"
+		}
+		sessionID = sid
+		return summary
+	})
+
+	return result, sessionID
 }

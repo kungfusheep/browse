@@ -37,6 +37,22 @@ type Provider interface {
 	CompleteConversation(ctx context.Context, system string, messages []Message) (string, error)
 }
 
+// SessionProvider extends Provider with session-based conversation support.
+// Not all providers support this - check with SupportsSession().
+type SessionProvider interface {
+	Provider
+
+	// SupportsSession returns true if this provider supports session-based conversations.
+	SupportsSession() bool
+
+	// StartSession begins a new conversation with a system prompt.
+	// Returns the response and a session ID for continuation.
+	StartSession(ctx context.Context, system, prompt string) (response string, sessionID string, err error)
+
+	// ContinueSession sends a message to an existing conversation.
+	ContinueSession(ctx context.Context, sessionID, prompt string) (string, error)
+}
+
 // Client manages LLM providers and selects the best available one.
 type Client struct {
 	providers []Provider
@@ -107,6 +123,49 @@ func (c *Client) CompleteConversation(ctx context.Context, system string, messag
 		return "", ErrNoProvider
 	}
 	return p.CompleteConversation(ctx, system, messages)
+}
+
+// SupportsSession returns true if the current provider supports session-based conversations.
+func (c *Client) SupportsSession() bool {
+	p := c.Provider()
+	if p == nil {
+		return false
+	}
+	if sp, ok := p.(SessionProvider); ok {
+		return sp.SupportsSession()
+	}
+	return false
+}
+
+// StartSession begins a new conversation with a system prompt.
+// Returns the response and a session ID for continuation.
+func (c *Client) StartSession(ctx context.Context, system, prompt string) (response string, sessionID string, err error) {
+	p := c.Provider()
+	if p == nil {
+		return "", "", ErrNoProvider
+	}
+	if sp, ok := p.(SessionProvider); ok && sp.SupportsSession() {
+		return sp.StartSession(ctx, system, prompt)
+	}
+	// Fallback: use regular completion, return empty session ID
+	response, err = p.CompleteWithSystem(ctx, system, prompt)
+	return response, "", err
+}
+
+// ContinueSession sends a message to an existing conversation.
+// If sessionID is empty, falls back to CompleteWithSystem.
+func (c *Client) ContinueSession(ctx context.Context, sessionID, system, prompt string) (string, error) {
+	p := c.Provider()
+	if p == nil {
+		return "", ErrNoProvider
+	}
+	if sessionID != "" {
+		if sp, ok := p.(SessionProvider); ok && sp.SupportsSession() {
+			return sp.ContinueSession(ctx, sessionID, prompt)
+		}
+	}
+	// Fallback: use regular completion with system prompt
+	return p.CompleteWithSystem(ctx, system, prompt)
 }
 
 // ListProviders returns info about all configured providers.

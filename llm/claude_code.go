@@ -149,6 +149,67 @@ func (c *ClaudeCode) run(ctx context.Context, system, prompt string) (string, er
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// SupportsSession returns true - Claude Code CLI supports session-based conversations.
+func (c *ClaudeCode) SupportsSession() bool {
+	return true
+}
+
+// StartSession begins a new conversation with a system prompt.
+// Returns the response and a session ID for continuation.
+func (c *ClaudeCode) StartSession(ctx context.Context, system, prompt string) (response string, sessionID string, err error) {
+	sessionID = uuid.New().String()
+
+	args := []string{
+		"--print",
+		"--session-id", sessionID,
+	}
+	if system != "" {
+		args = append(args, "--system-prompt", system)
+	}
+	args = append(args, prompt)
+
+	cmd := exec.CommandContext(ctx, c.cliPath, args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		if stderr.Len() > 0 {
+			return "", "", &CLIError{Err: err, Stderr: stderr.String()}
+		}
+		return "", "", err
+	}
+
+	return strings.TrimSpace(stdout.String()), sessionID, nil
+}
+
+// ContinueSession sends a message to an existing conversation.
+func (c *ClaudeCode) ContinueSession(ctx context.Context, sessionID, prompt string) (string, error) {
+	args := []string{
+		"--print",
+		"--resume", sessionID,
+		prompt,
+	}
+
+	cmd := exec.CommandContext(ctx, c.cliPath, args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		if stderr.Len() > 0 {
+			return "", &CLIError{Err: err, Stderr: stderr.String()}
+		}
+		return "", err
+	}
+
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 // CLIError wraps CLI execution errors with stderr output.
 type CLIError struct {
 	Err    error

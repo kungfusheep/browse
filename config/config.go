@@ -46,6 +46,11 @@ type Session struct {
 	RestoreSession bool `json:"restoreSession"`
 }
 
+// Editor settings
+type Editor struct {
+	Scheme string `json:"scheme"` // "emacs" or "vim"
+}
+
 // Keybindings configuration
 type Keybindings struct {
 	// Navigation
@@ -97,6 +102,8 @@ type Keybindings struct {
 	ReloadWithJs       string `json:"reloadWithJs"`
 	GenerateRules      string `json:"generateRules"`
 	EditConfig         string `json:"editConfig"`
+	AISummary          string `json:"aiSummary"`
+	EditorSandbox      string `json:"editorSandbox"`
 }
 
 // Config is the main configuration struct
@@ -106,6 +113,7 @@ type Config struct {
 	Fetcher     Fetcher     `json:"fetcher"`
 	Rendering   Rendering   `json:"rendering"`
 	Session     Session     `json:"session"`
+	Editor      Editor      `json:"editor"`
 	Keybindings Keybindings `json:"keybindings"`
 }
 
@@ -132,6 +140,9 @@ func Default() *Config {
 		},
 		Session: Session{
 			RestoreSession: true,
+		},
+		Editor: Editor{
+			Scheme: "emacs",
 		},
 		Keybindings: Keybindings{
 			Quit:               "q",
@@ -170,6 +181,8 @@ func Default() *Config {
 			ReloadWithJs:       "r",
 			GenerateRules:      "R",
 			EditConfig:         "C",
+			AISummary:          "S",
+			EditorSandbox:      "~",
 		},
 	}
 }
@@ -284,6 +297,11 @@ func merge(defaults, user *Config) *Config {
 		result.Rendering.DefaultWidth = user.Rendering.DefaultWidth
 	}
 
+	// Editor
+	if user.Editor.Scheme != "" {
+		result.Editor.Scheme = user.Editor.Scheme
+	}
+
 	// Keybindings - override each if set
 	mergeKeybinding(&result.Keybindings.Quit, user.Keybindings.Quit)
 	mergeKeybinding(&result.Keybindings.ScrollDown, user.Keybindings.ScrollDown)
@@ -321,6 +339,8 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.ReloadWithJs, user.Keybindings.ReloadWithJs)
 	mergeKeybinding(&result.Keybindings.GenerateRules, user.Keybindings.GenerateRules)
 	mergeKeybinding(&result.Keybindings.EditConfig, user.Keybindings.EditConfig)
+	mergeKeybinding(&result.Keybindings.AISummary, user.Keybindings.AISummary)
+	mergeKeybinding(&result.Keybindings.EditorSandbox, user.Keybindings.EditorSandbox)
 
 	return &result
 }
@@ -428,6 +448,7 @@ keybindings = new {
   reloadWithJs = "r"
   generateRules = "R"
   editConfig = "C"
+  aiSummary = "S"
 }
 `
 }
