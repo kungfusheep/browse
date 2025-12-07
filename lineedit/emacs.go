@@ -29,6 +29,7 @@ func (s *EmacsScheme) HandleKey(e *Editor, buf []byte, n int) Event {
 	if buf[0] == 27 && n >= 2 {
 		switch {
 		case buf[1] == 127: // Alt+Backspace
+			e.SaveState()
 			e.DeleteWordBackward()
 			return Event{Consumed: true, TextChanged: true}
 		case buf[1] == 'b' || buf[1] == 'B': // Alt+B
@@ -38,6 +39,7 @@ func (s *EmacsScheme) HandleKey(e *Editor, buf []byte, n int) Event {
 			e.WordRight()
 			return Event{Consumed: true}
 		case buf[1] == 'd' || buf[1] == 'D': // Alt+D
+			e.SaveState()
 			e.DeleteWordForward()
 			return Event{Consumed: true, TextChanged: true}
 		case n >= 3 && buf[1] == '[': // Arrow keys
@@ -82,28 +84,40 @@ func (s *EmacsScheme) HandleKey(e *Editor, buf []byte, n int) Event {
 		return Event{Consumed: true}
 
 	case buf[0] == 4: // Ctrl+D
+		e.SaveState()
 		if e.DeleteForward() {
 			return Event{Consumed: true, TextChanged: true}
 		}
 		return Event{Consumed: true}
 
 	case buf[0] == 11: // Ctrl+K
+		e.SaveState()
 		e.KillToEnd()
 		return Event{Consumed: true, TextChanged: true}
 
 	case buf[0] == 21: // Ctrl+U
+		e.SaveState()
 		e.KillToStart()
 		return Event{Consumed: true, TextChanged: true}
 
 	case buf[0] == 23: // Ctrl+W
+		e.SaveState()
 		e.DeleteWordBackward()
 		return Event{Consumed: true, TextChanged: true}
 
 	case buf[0] == 20: // Ctrl+T
+		e.SaveState()
 		e.Transpose()
 		return Event{Consumed: true, TextChanged: true}
 
+	case buf[0] == 26 || buf[0] == 31: // Ctrl+Z or Ctrl+_ (undo)
+		if e.Undo() {
+			return Event{Consumed: true, TextChanged: true}
+		}
+		return Event{Consumed: true}
+
 	case buf[0] == 127 || buf[0] == 8: // Backspace
+		e.SaveState()
 		if e.DeleteBackward() {
 			return Event{Consumed: true, TextChanged: true}
 		}

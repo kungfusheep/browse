@@ -1,10 +1,18 @@
 // Package lineedit provides a simple line editor with emacs-style keybindings.
 package lineedit
 
-// Editor is a simple single-line text editor with cursor tracking.
-type Editor struct {
+// editorState represents a snapshot of editor state for undo.
+type editorState struct {
 	text   []byte
 	cursor int
+}
+
+// Editor is a simple single-line text editor with cursor tracking.
+type Editor struct {
+	text    []byte
+	cursor  int
+	history []editorState // Undo history stack
+	maxHist int           // Maximum history size (0 = unlimited)
 }
 
 // New creates a new empty Editor.
@@ -48,6 +56,60 @@ func (e *Editor) Clear() {
 func (e *Editor) Set(text string) {
 	e.text = []byte(text)
 	e.cursor = len(e.text)
+}
+
+// SaveState saves the current state to the undo history.
+// Call this before making changes that should be undoable.
+func (e *Editor) SaveState() {
+	// Don't save if state is identical to last saved state
+	if len(e.history) > 0 {
+		last := e.history[len(e.history)-1]
+		if last.cursor == e.cursor && string(last.text) == string(e.text) {
+			return
+		}
+	}
+
+	// Make a copy of the text
+	textCopy := make([]byte, len(e.text))
+	copy(textCopy, e.text)
+
+	e.history = append(e.history, editorState{
+		text:   textCopy,
+		cursor: e.cursor,
+	})
+
+	// Trim history if needed
+	if e.maxHist > 0 && len(e.history) > e.maxHist {
+		e.history = e.history[1:]
+	}
+}
+
+// Undo restores the previous state from the undo history.
+// Returns true if undo was performed, false if history is empty.
+func (e *Editor) Undo() bool {
+	if len(e.history) == 0 {
+		return false
+	}
+
+	// Pop the last state
+	last := e.history[len(e.history)-1]
+	e.history = e.history[:len(e.history)-1]
+
+	// Restore state
+	e.text = last.text
+	e.cursor = last.cursor
+
+	return true
+}
+
+// ClearHistory clears the undo history.
+func (e *Editor) ClearHistory() {
+	e.history = e.history[:0]
+}
+
+// SetMaxHistory sets the maximum undo history size (0 = unlimited).
+func (e *Editor) SetMaxHistory(max int) {
+	e.maxHist = max
 }
 
 // BeforeCursor returns text before the cursor.

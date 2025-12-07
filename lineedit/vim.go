@@ -252,6 +252,7 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 		case 'x': // Delete char at cursor
 			cnt := s.getCount()
 			s.resetState()
+			e.SaveState()
 			changed := false
 			for i := 0; i < cnt; i++ {
 				if e.DeleteForward() {
@@ -263,6 +264,7 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 		case 'X': // Delete char before cursor
 			cnt := s.getCount()
 			s.resetState()
+			e.SaveState()
 			changed := false
 			for i := 0; i < cnt; i++ {
 				if e.DeleteBackward() {
@@ -273,17 +275,20 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 
 		case 'D': // Delete to end of line
 			s.resetState()
+			e.SaveState()
 			e.KillToEnd()
 			return Event{Consumed: true, TextChanged: true}
 
 		case 'C': // Change to end of line (delete + insert)
 			s.resetState()
+			e.SaveState()
 			e.KillToEnd()
 			s.mode = VimInsert
 			return Event{Consumed: true, TextChanged: true}
 
 		case 'S': // Substitute line (clear + insert)
 			s.resetState()
+			e.SaveState()
 			e.Clear()
 			s.mode = VimInsert
 			return Event{Consumed: true, TextChanged: true}
@@ -291,11 +296,19 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 		case 's': // Substitute char (delete + insert)
 			cnt := s.getCount()
 			s.resetState()
+			e.SaveState()
 			for i := 0; i < cnt; i++ {
 				e.DeleteForward()
 			}
 			s.mode = VimInsert
 			return Event{Consumed: true, TextChanged: true}
+
+		case 'u': // Undo
+			s.resetState()
+			if e.Undo() {
+				return Event{Consumed: true, TextChanged: true}
+			}
+			return Event{Consumed: true}
 		}
 	}
 
@@ -400,13 +413,15 @@ func (s *VimScheme) executeOperator(e *Editor, start, end int) (Event, bool) {
 
 	switch s.operator {
 	case OpDelete:
-		// Delete the range
+		// Save state before deleting
+		e.SaveState()
 		e.Set(text[:start] + text[end:])
 		e.SetCursor(start)
 		return Event{Consumed: true, TextChanged: true}, false
 
 	case OpChange:
-		// Delete the range and enter insert mode
+		// Save state before changing
+		e.SaveState()
 		e.Set(text[:start] + text[end:])
 		e.SetCursor(start)
 		return Event{Consumed: true, TextChanged: true}, true
@@ -429,10 +444,12 @@ func (s *VimScheme) executeLineOperation(e *Editor) Event {
 
 	switch op {
 	case OpDelete:
+		e.SaveState()
 		e.Clear()
 		return Event{Consumed: true, TextChanged: true}
 
 	case OpChange:
+		e.SaveState()
 		e.Clear()
 		s.mode = VimInsert
 		return Event{Consumed: true, TextChanged: true}

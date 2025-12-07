@@ -637,3 +637,87 @@ func TestVimTextObjectSentenceWithDifferentPunctuation(t *testing.T) {
 		t.Errorf("dis should work with ?, got %q", e.Text())
 	}
 }
+
+func TestVimUndo(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Type some text
+	e.Set("hello world")
+	e.Home()
+
+	// Delete word with dw
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != "world" {
+		t.Errorf("dw should delete word, got %q", e.Text())
+	}
+
+	// Undo with u
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "hello world" {
+		t.Errorf("u should undo, got %q", e.Text())
+	}
+
+	// Test undo after x
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'x'}, 1)
+	if e.Text() != "ello" {
+		t.Errorf("x should delete char, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "hello" {
+		t.Errorf("u should undo x, got %q", e.Text())
+	}
+
+	// Test multiple undos
+	e.Set("abc")
+	e.Home()
+	s.HandleKey(e, []byte{'x'}, 1) // delete 'a'
+	s.HandleKey(e, []byte{'x'}, 1) // delete 'b'
+	if e.Text() != "c" {
+		t.Errorf("two x should leave 'c', got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'u'}, 1) // undo second x
+	if e.Text() != "bc" {
+		t.Errorf("first undo should restore 'bc', got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'u'}, 1) // undo first x
+	if e.Text() != "abc" {
+		t.Errorf("second undo should restore 'abc', got %q", e.Text())
+	}
+}
+
+func TestEmacsUndo(t *testing.T) {
+	e := New()
+	s := NewEmacsScheme()
+
+	// Type some text and delete word
+	e.Set("hello world")
+	e.End()
+	s.HandleKey(e, []byte{23}, 1) // Ctrl+W deletes word backward
+	if e.Text() != "hello " {
+		t.Errorf("Ctrl+W should delete word, got %q", e.Text())
+	}
+
+	// Undo with Ctrl+Z
+	s.HandleKey(e, []byte{26}, 1)
+	if e.Text() != "hello world" {
+		t.Errorf("Ctrl+Z should undo, got %q", e.Text())
+	}
+
+	// Test undo with Ctrl+_
+	e.Set("test")
+	e.End()
+	s.HandleKey(e, []byte{11}, 1) // Ctrl+K kills to end (but we're at end, so does nothing visible)
+	e.Home()
+	s.HandleKey(e, []byte{11}, 1) // Ctrl+K kills to end from start
+	if e.Text() != "" {
+		t.Errorf("Ctrl+K should kill line, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{31}, 1) // Ctrl+_ to undo
+	if e.Text() != "test" {
+		t.Errorf("Ctrl+_ should undo, got %q", e.Text())
+	}
+}
