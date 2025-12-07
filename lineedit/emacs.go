@@ -116,6 +116,12 @@ func (s *EmacsScheme) HandleKey(e *Editor, buf []byte, n int) Event {
 		}
 		return Event{Consumed: true}
 
+	case buf[0] == 25: // Ctrl+Y (redo)
+		if e.Redo() {
+			return Event{Consumed: true, TextChanged: true}
+		}
+		return Event{Consumed: true}
+
 	case buf[0] == 127 || buf[0] == 8: // Backspace
 		e.SaveState()
 		if e.DeleteBackward() {

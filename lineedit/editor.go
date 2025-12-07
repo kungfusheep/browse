@@ -9,10 +9,11 @@ type editorState struct {
 
 // Editor is a simple single-line text editor with cursor tracking.
 type Editor struct {
-	text    []byte
-	cursor  int
-	history []editorState // Undo history stack
-	maxHist int           // Maximum history size (0 = unlimited)
+	text        []byte
+	cursor      int
+	history     []editorState // Undo history stack
+	redoHistory []editorState // Redo history stack
+	maxHist     int           // Maximum history size (0 = unlimited)
 }
 
 // New creates a new empty Editor.
@@ -82,6 +83,9 @@ func (e *Editor) SaveState() {
 	if e.maxHist > 0 && len(e.history) > e.maxHist {
 		e.history = e.history[1:]
 	}
+
+	// Clear redo history - new change invalidates redo
+	e.redoHistory = e.redoHistory[:0]
 }
 
 // Undo restores the previous state from the undo history.
@@ -91,7 +95,15 @@ func (e *Editor) Undo() bool {
 		return false
 	}
 
-	// Pop the last state
+	// Save current state to redo history before undoing
+	textCopy := make([]byte, len(e.text))
+	copy(textCopy, e.text)
+	e.redoHistory = append(e.redoHistory, editorState{
+		text:   textCopy,
+		cursor: e.cursor,
+	})
+
+	// Pop the last state from undo history
 	last := e.history[len(e.history)-1]
 	e.history = e.history[:len(e.history)-1]
 
@@ -102,9 +114,36 @@ func (e *Editor) Undo() bool {
 	return true
 }
 
-// ClearHistory clears the undo history.
+// Redo restores the next state from the redo history.
+// Returns true if redo was performed, false if redo history is empty.
+func (e *Editor) Redo() bool {
+	if len(e.redoHistory) == 0 {
+		return false
+	}
+
+	// Save current state to undo history before redoing
+	textCopy := make([]byte, len(e.text))
+	copy(textCopy, e.text)
+	e.history = append(e.history, editorState{
+		text:   textCopy,
+		cursor: e.cursor,
+	})
+
+	// Pop the last state from redo history
+	last := e.redoHistory[len(e.redoHistory)-1]
+	e.redoHistory = e.redoHistory[:len(e.redoHistory)-1]
+
+	// Restore state
+	e.text = last.text
+	e.cursor = last.cursor
+
+	return true
+}
+
+// ClearHistory clears the undo and redo history.
 func (e *Editor) ClearHistory() {
 	e.history = e.history[:0]
+	e.redoHistory = e.redoHistory[:0]
 }
 
 // SetMaxHistory sets the maximum undo history size (0 = unlimited).

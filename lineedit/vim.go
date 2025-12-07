@@ -312,6 +312,15 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 		}
 	}
 
+	// Ctrl+R for redo (works in normal mode, outside the operator-pending check)
+	if ch == 18 { // Ctrl+R
+		s.resetState()
+		if e.Redo() {
+			return Event{Consumed: true, TextChanged: true}
+		}
+		return Event{Consumed: true}
+	}
+
 	// Unknown key - reset state if we had operator pending
 	if s.mode == VimOperatorPending {
 		s.resetState()
@@ -374,6 +383,9 @@ func (s *VimScheme) handleMotion(e *Editor, ch byte) (Event, bool) {
 	}
 
 	// Operator pending - execute operator over motion range
+	// Save state BEFORE moving cursor (so undo restores to original position)
+	e.SaveState()
+
 	startPos := e.Cursor()
 
 	// Execute motion to find end position
@@ -408,20 +420,17 @@ func (s *VimScheme) handleMotion(e *Editor, ch byte) (Event, bool) {
 
 // executeOperator applies the current operator to the range [start, end).
 // Returns the event and whether to enter insert mode after.
+// Note: SaveState should be called BEFORE this function (by caller).
 func (s *VimScheme) executeOperator(e *Editor, start, end int) (Event, bool) {
 	text := e.Text()
 
 	switch s.operator {
 	case OpDelete:
-		// Save state before deleting
-		e.SaveState()
 		e.Set(text[:start] + text[end:])
 		e.SetCursor(start)
 		return Event{Consumed: true, TextChanged: true}, false
 
 	case OpChange:
-		// Save state before changing
-		e.SaveState()
 		e.Set(text[:start] + text[end:])
 		e.SetCursor(start)
 		return Event{Consumed: true, TextChanged: true}, true
@@ -495,6 +504,9 @@ func (s *VimScheme) handleTextObject(e *Editor, ch byte) (Event, bool) {
 		s.mode = VimNormal
 		return Event{Consumed: true}, true
 	}
+
+	// Save state before executing operator
+	e.SaveState()
 
 	// Execute the operator on the text object range
 	ev, enterInsert := s.executeOperator(e, start, end)

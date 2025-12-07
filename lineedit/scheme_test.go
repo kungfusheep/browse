@@ -721,3 +721,72 @@ func TestEmacsUndo(t *testing.T) {
 		t.Errorf("Ctrl+_ should undo, got %q", e.Text())
 	}
 }
+
+func TestVimRedo(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Setup: delete something then undo
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != "world" {
+		t.Errorf("dw should delete word, got %q", e.Text())
+	}
+
+	// Undo
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "hello world" {
+		t.Errorf("u should undo, got %q", e.Text())
+	}
+
+	// Redo with Ctrl+R
+	s.HandleKey(e, []byte{18}, 1)
+	if e.Text() != "world" {
+		t.Errorf("Ctrl+R should redo, got %q", e.Text())
+	}
+
+	// Undo again
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "hello world" {
+		t.Errorf("u should undo again, got %q", e.Text())
+	}
+
+	// Make a new change - this should clear redo history
+	s.HandleKey(e, []byte{'x'}, 1)
+	if e.Text() != "ello world" {
+		t.Errorf("x should delete char, got %q", e.Text())
+	}
+
+	// Redo should do nothing now (new change cleared redo)
+	s.HandleKey(e, []byte{18}, 1)
+	if e.Text() != "ello world" {
+		t.Errorf("Ctrl+R after new change should do nothing, got %q", e.Text())
+	}
+}
+
+func TestEmacsRedo(t *testing.T) {
+	e := New()
+	s := NewEmacsScheme()
+
+	// Setup: delete something then undo
+	e.Set("hello world")
+	e.End()
+	s.HandleKey(e, []byte{23}, 1) // Ctrl+W deletes word
+	if e.Text() != "hello " {
+		t.Errorf("Ctrl+W should delete word, got %q", e.Text())
+	}
+
+	// Undo
+	s.HandleKey(e, []byte{26}, 1)
+	if e.Text() != "hello world" {
+		t.Errorf("Ctrl+Z should undo, got %q", e.Text())
+	}
+
+	// Redo with Ctrl+Y
+	s.HandleKey(e, []byte{25}, 1)
+	if e.Text() != "hello " {
+		t.Errorf("Ctrl+Y should redo, got %q", e.Text())
+	}
+}
