@@ -15,6 +15,8 @@ type Result struct {
 	Provider        string // The search provider used (if IsSearch)
 	IsAISummary     bool   // Whether this is an AI summary request
 	AIPrompt        string // Optional custom prompt for AI (empty = default summary)
+	IsDictLookup    bool   // Whether this is a dictionary lookup
+	DictWord        string // Word to look up in dictionary
 }
 
 // Prefix represents a search prefix configuration.
@@ -69,8 +71,8 @@ func DefaultPrefixes() []Prefix {
 			Internal: true,
 		},
 		{
-			Names:    []string{"dict", "wiktionary"},
-			Display:  "Wiktionary",
+			Names:    []string{"dict", "define", "d"},
+			Display:  "Dictionary",
 			Internal: true,
 		},
 		{
@@ -127,6 +129,16 @@ func (p *Parser) Parse(input string) Result {
 		if strings.HasPrefix(inputLower, aiPrefix) {
 			prompt := strings.TrimSpace(input[len(aiPrefix):])
 			return Result{IsAISummary: true, AIPrompt: prompt, Provider: "AI Summary"}
+		}
+	}
+
+	// Check for dictionary lookup prefixes
+	for _, dictPrefix := range []string{"dict ", "define ", "d "} {
+		if strings.HasPrefix(inputLower, dictPrefix) {
+			word := strings.TrimSpace(input[len(dictPrefix):])
+			if word != "" {
+				return Result{IsDictLookup: true, DictWord: word, Provider: "Dictionary"}
+			}
 		}
 	}
 

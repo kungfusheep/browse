@@ -73,6 +73,7 @@ type Keybindings struct {
 	CopyUrl       string `json:"copyUrl"`
 	EditInEditor  string `json:"editInEditor"`
 	FollowLink    string `json:"followLink"`
+	DefineWord    string `json:"defineWord"`    // look up word definition
 
 	// Overlays
 	TableOfContents string `json:"tableOfContents"`
@@ -162,6 +163,7 @@ func Default() *Config {
 			CopyUrl:       "y",
 			EditInEditor:       "E",
 			FollowLink:         "f",
+			DefineWord:         "D",
 			TableOfContents:    "t",
 			SiteNavigation:     "n",
 			LinkIndex:          "l",

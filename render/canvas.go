@@ -217,6 +217,56 @@ func (c *Canvas) RenderTo(w *os.File) error {
 	return err
 }
 
+// Word represents a word extracted from the canvas with its position.
+type Word struct {
+	Text string
+	X, Y int
+}
+
+// ExtractWords extracts all words (3+ letters) from the canvas with positions.
+// Returns ALL occurrences in reading order (top-to-bottom, left-to-right).
+func (c *Canvas) ExtractWords(minLen int) []Word {
+	var words []Word
+
+	for y := 0; y < c.height; y++ {
+		var currentWord strings.Builder
+		wordStartX := 0
+
+		for x := 0; x < c.width; x++ {
+			r := c.cells[y][x].Rune
+			isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+
+			if isLetter {
+				if currentWord.Len() == 0 {
+					wordStartX = x
+				}
+				currentWord.WriteRune(r)
+			} else {
+				if currentWord.Len() >= minLen {
+					word := strings.ToLower(currentWord.String())
+					words = append(words, Word{
+						Text: word,
+						X:    wordStartX,
+						Y:    y,
+					})
+				}
+				currentWord.Reset()
+			}
+		}
+		// Handle word at end of line
+		if currentWord.Len() >= minLen {
+			word := strings.ToLower(currentWord.String())
+			words = append(words, Word{
+				Text: word,
+				X:    wordStartX,
+				Y:    y,
+			})
+		}
+	}
+
+	return words
+}
+
 // PlainText returns the canvas content as plain text without ANSI codes.
 // Uses the same render output but strips escape sequences.
 func (c *Canvas) PlainText() string {

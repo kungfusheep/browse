@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"browse/config"
+	"browse/dict"
 	"browse/document"
 	"browse/favourites"
 	"browse/fetcher"
@@ -365,6 +366,11 @@ func run(url string) error {
 	loading := false         // currently loading a page
 	structureMode := false   // showing DOM structure inspector
 	jumpInput := ""
+	defineMode := false              // word definition lookup mode
+	defineFilter := ""               // word prefix filter (what user is typing)
+	defineAllWords := []render.Word{}   // all word occurrences (with positions)
+	defineUniqueWords := []string{}     // unique matching word texts (for labels)
+	defineWordPositions := map[string][]render.Word{} // word text -> all its positions
 	gPending := false // waiting for second key after 'g'
 
 	// Key matching helpers for configurable bindings
@@ -439,6 +445,58 @@ func run(url string) error {
 			maxScroll = 0
 		}
 		scrollY = 0
+	}
+
+	// generateDictHTML renders dictionary definitions as HTML
+	generateDictHTML := func(word string, entries []dict.Entry) string {
+		var content strings.Builder
+
+		if len(entries) == 0 {
+			content.WriteString(fmt.Sprintf(`<p>No definitions found for "<strong>%s</strong>".</p>`, word))
+			content.WriteString(`<p>Try a different spelling or check if the word exists.</p>`)
+		} else {
+			for _, entry := range entries {
+				// Show phonetic if available
+				if entry.Phonetic != "" {
+					content.WriteString(fmt.Sprintf(`<p><em>%s</em></p>`, entry.Phonetic))
+				}
+
+				// Show each meaning (part of speech + definitions)
+				for _, meaning := range entry.Meanings {
+					content.WriteString(fmt.Sprintf(`<h2>%s</h2>`, meaning.PartOfSpeech))
+
+					content.WriteString("<ol>")
+					for _, def := range meaning.Definitions {
+						content.WriteString("<li>")
+						content.WriteString(fmt.Sprintf(`<p>%s</p>`, def.Definition))
+						if def.Example != "" {
+							content.WriteString(fmt.Sprintf(`<p><em>"%s"</em></p>`, def.Example))
+						}
+						content.WriteString("</li>")
+					}
+					content.WriteString("</ol>")
+
+					// Show synonyms if available
+					if len(meaning.Synonyms) > 0 {
+						content.WriteString(`<p><strong>Synonyms:</strong> `)
+						content.WriteString(strings.Join(meaning.Synonyms, ", "))
+						content.WriteString(`</p>`)
+					}
+				}
+				content.WriteString("<hr>")
+			}
+		}
+
+		return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Definition: %s</title></head>
+<body>
+<article>
+<h1>%s</h1>
+%s
+</article>
+</body>
+</html>`, word, word, content.String())
 	}
 
 	// chatToHTML renders an AI chat session as a full HTML page
@@ -676,6 +734,58 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		if inputMode {
 			labels = document.GenerateLabels(len(renderer.Inputs()))
 			renderer.RenderInputLabels(labels, jumpInput)
+		}
+		if defineMode {
+			// Group words by text, filter by prefix
+			defineWordPositions = make(map[string][]render.Word)
+			for _, w := range defineAllWords {
+				if strings.HasPrefix(w.Text, defineFilter) {
+					defineWordPositions[w.Text] = append(defineWordPositions[w.Text], w)
+				}
+			}
+			// Get unique words sorted for consistent labeling
+			defineUniqueWords = make([]string, 0, len(defineWordPositions))
+			for word := range defineWordPositions {
+				defineUniqueWords = append(defineUniqueWords, word)
+			}
+
+			// Show labels on ALL occurrences of each unique word
+			if len(defineFilter) >= 1 && len(defineUniqueWords) > 0 {
+				labels = document.GenerateLabels(len(defineUniqueWords))
+				for i, word := range defineUniqueWords {
+					if i >= len(labels) {
+						break
+					}
+					label := labels[i]
+					// Put same label on ALL occurrences of this word
+					for _, pos := range defineWordPositions[word] {
+						for j, ch := range label {
+							if pos.X+j < canvas.Width() {
+								style := render.Style{Reverse: true, Bold: true, FgColor: render.ColorYellow}
+								canvas.Set(pos.X+j, pos.Y, ch, style)
+							}
+						}
+					}
+				}
+			}
+
+			// Show filter prompt at bottom
+			promptY := height - 1
+			promptStyle := render.Style{Reverse: true}
+			var prompt string
+			if len(defineFilter) == 0 {
+				prompt = " Define: type word... "
+			} else if len(defineUniqueWords) == 0 {
+				prompt = fmt.Sprintf(" Define: %s (no matches) ", defineFilter)
+			} else if len(defineUniqueWords) == 1 {
+				prompt = fmt.Sprintf(" Define: %s → %s (Enter) ", defineFilter, defineUniqueWords[0])
+			} else {
+				prompt = fmt.Sprintf(" Define: %s (%d words) ", defineFilter, len(defineUniqueWords))
+			}
+			canvas.WriteString(0, promptY, prompt, promptStyle)
+			for x := len(prompt); x < width; x++ {
+				canvas.Set(x, promptY, ' ', promptStyle)
+			}
 		}
 		if tocMode {
 			canvas.DimAll()
@@ -1183,6 +1293,93 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						jumpInput = ""
 					}
 					redraw() // Always redraw to show input highlighting
+				}
+			}
+			continue
+		}
+
+		// Define mode input handling
+		if defineMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel
+				defineMode = false
+				defineFilter = ""
+				redraw()
+
+			case buf[0] == 127 || buf[0] == 8: // Backspace - remove last char
+				if len(defineFilter) > 0 {
+					defineFilter = defineFilter[:len(defineFilter)-1]
+				}
+				redraw()
+
+			case buf[0] == 13 || buf[0] == 10: // Enter - select first/only match
+				if len(defineUniqueWords) > 0 {
+					defineMode = false
+					wordText := defineUniqueWords[0]
+					defineFilter = ""
+					loading = true
+					redraw()
+					dictClient := dict.NewClient()
+					definitions, err := dictClient.Define(wordText)
+					loading = false
+					if err != nil {
+						errorHTML := fmt.Sprintf(`<!DOCTYPE html><html><head><title>Dictionary Error</title></head><body><article><h1>Dictionary Lookup Failed</h1><p>Could not look up "%s": %s</p></article></body></html>`, wordText, err.Error())
+						errorDoc, _ := html.ParseString(errorHTML)
+						navigateTo("dict://"+wordText, errorDoc, errorHTML)
+					} else {
+						dictHTML := generateDictHTML(wordText, definitions)
+						dictDoc, parseErr := html.ParseString(dictHTML)
+						if parseErr == nil {
+							navigateTo("dict://"+wordText, dictDoc, dictHTML)
+						}
+					}
+					redraw()
+				}
+
+			case buf[0] >= 'a' && buf[0] <= 'z':
+				ch := string(buf[0])
+				newFilter := defineFilter + ch
+
+				// Would extending filter still have matches?
+				hasFilterMatches := false
+				for _, w := range defineAllWords {
+					if strings.HasPrefix(w.Text, newFilter) {
+						hasFilterMatches = true
+						break
+					}
+				}
+
+				if hasFilterMatches {
+					// Extend filter
+					defineFilter = newFilter
+					redraw()
+				} else if len(defineFilter) >= 1 && len(defineUniqueWords) > 0 {
+					// No filter matches - check if it's a label
+					for i, label := range labels {
+						if label == ch && i < len(defineUniqueWords) {
+							defineMode = false
+							wordText := defineUniqueWords[i]
+							defineFilter = ""
+							loading = true
+							redraw()
+							dictClient := dict.NewClient()
+							definitions, err := dictClient.Define(wordText)
+							loading = false
+							if err != nil {
+								errorHTML := fmt.Sprintf(`<!DOCTYPE html><html><head><title>Dictionary Error</title></head><body><article><h1>Dictionary Lookup Failed</h1><p>Could not look up "%s": %s</p></article></body></html>`, wordText, err.Error())
+								errorDoc, _ := html.ParseString(errorHTML)
+								navigateTo("dict://"+wordText, errorDoc, errorHTML)
+							} else {
+								dictHTML := generateDictHTML(wordText, definitions)
+								dictDoc, parseErr := html.ParseString(dictHTML)
+								if parseErr == nil {
+									navigateTo("dict://"+wordText, dictDoc, dictHTML)
+								}
+							}
+							redraw()
+							break
+						}
+					}
 				}
 			}
 			continue
@@ -2033,6 +2230,30 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						continue
 					}
 
+					// Dictionary lookup request
+					if result.IsDictLookup {
+						loading = true
+						redraw()
+						dictClient := dict.NewClient()
+						definitions, err := dictClient.Define(result.DictWord)
+						loading = false
+						if err != nil {
+							// Show error page
+							errorHTML := fmt.Sprintf(`<!DOCTYPE html><html><head><title>Dictionary Error</title></head><body><article><h1>Dictionary Lookup Failed</h1><p>Could not look up "%s": %s</p></article></body></html>`, result.DictWord, err.Error())
+							errorDoc, _ := html.ParseString(errorHTML)
+							navigateTo("dict://"+result.DictWord, errorDoc, errorHTML)
+						} else {
+							// Generate dictionary page
+							dictHTML := generateDictHTML(result.DictWord, definitions)
+							dictDoc, parseErr := html.ParseString(dictHTML)
+							if parseErr == nil {
+								navigateTo("dict://"+result.DictWord, dictDoc, dictHTML)
+							}
+						}
+						redraw()
+						continue
+					}
+
 					if result.UseInternal {
 						// Use internal search provider
 						provider := search.ProviderByName(result.Provider)
@@ -2198,6 +2419,14 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		case key(buf[0], kb.FollowLink): // follow link - enter jump mode
 			jumpMode = true
 			jumpInput = ""
+			redraw()
+
+		case key(buf[0], kb.DefineWord): // define word - enter define mode
+			defineMode = true
+			defineFilter = ""
+			defineAllWords = canvas.ExtractWords(3)
+			defineUniqueWords = nil
+			defineWordPositions = nil
 			redraw()
 
 		case keyG(buf[0], kb.NextBuffer): // gt - next buffer
@@ -3908,4 +4137,86 @@ Do NOT include <html>, <head>, <body>, or <article> tags.`
 	})
 
 	return result, sessionID
+}
+
+// generateDictHTML generates HTML for dictionary lookup results.
+func generateDictHTML(word string, entries []dict.Entry) string {
+	var b strings.Builder
+	b.WriteString(`<!DOCTYPE html><html><head><title>Definition: `)
+	b.WriteString(word)
+	b.WriteString(`</title></head><body><article>`)
+
+	if len(entries) == 0 {
+		b.WriteString(`<h1>`)
+		b.WriteString(word)
+		b.WriteString(`</h1><p>No definition found for "`)
+		b.WriteString(word)
+		b.WriteString(`".</p>`)
+	} else {
+		for _, entry := range entries {
+			b.WriteString(`<h1>`)
+			b.WriteString(entry.Word)
+			b.WriteString(`</h1>`)
+
+			// Phonetic pronunciation
+			if entry.Phonetic != "" {
+				b.WriteString(`<p><em>`)
+				b.WriteString(entry.Phonetic)
+				b.WriteString(`</em></p>`)
+			}
+
+			// Meanings by part of speech
+			for _, meaning := range entry.Meanings {
+				b.WriteString(`<h2>`)
+				b.WriteString(meaning.PartOfSpeech)
+				b.WriteString(`</h2>`)
+
+				b.WriteString(`<ol>`)
+				for _, def := range meaning.Definitions {
+					b.WriteString(`<li>`)
+					b.WriteString(def.Definition)
+					if def.Example != "" {
+						b.WriteString(`<br><em>"`)
+						b.WriteString(def.Example)
+						b.WriteString(`"</em>`)
+					}
+					b.WriteString(`</li>`)
+				}
+				b.WriteString(`</ol>`)
+
+				// Synonyms for this part of speech
+				if len(meaning.Synonyms) > 0 {
+					b.WriteString(`<p><strong>Synonyms:</strong> `)
+					b.WriteString(strings.Join(meaning.Synonyms, ", "))
+					b.WriteString(`</p>`)
+				}
+
+				// Antonyms for this part of speech
+				if len(meaning.Antonyms) > 0 {
+					b.WriteString(`<p><strong>Antonyms:</strong> `)
+					b.WriteString(strings.Join(meaning.Antonyms, ", "))
+					b.WriteString(`</p>`)
+				}
+			}
+
+			// Source URLs
+			if len(entry.SourceURLs) > 0 {
+				b.WriteString(`<hr><p><small>Sources: `)
+				for i, src := range entry.SourceURLs {
+					if i > 0 {
+						b.WriteString(`, `)
+					}
+					b.WriteString(`<a href="`)
+					b.WriteString(src)
+					b.WriteString(`">`)
+					b.WriteString(src)
+					b.WriteString(`</a>`)
+				}
+				b.WriteString(`</small></p>`)
+			}
+		}
+	}
+
+	b.WriteString(`</article></body></html>`)
+	return b.String()
 }
