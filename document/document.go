@@ -7,6 +7,7 @@ import (
 
 	"browse/html"
 	"browse/render"
+	"browse/theme"
 )
 
 // Options holds configuration for the document renderer.
@@ -1412,11 +1413,14 @@ func (r *Renderer) RenderLinkLabels(labels []string, inputPrefix string) {
 			if link.X+j < r.canvas.Width() {
 				var style render.Style
 				if !matches && inputPrefix != "" {
-					style = render.Style{Dim: true}
+					style = theme.Current.LabelDim.Style()
 				} else if j < len(inputPrefix) {
-					style = render.Style{Bold: true, FgColor: render.ColorGreen}
+					style = theme.Current.LabelTyped.Style()
+					style.Bold = true
 				} else {
-					style = render.Style{Reverse: true, Bold: true}
+					style = theme.Current.Label.Style()
+					style.Reverse = true
+					style.Bold = true
 				}
 				r.canvas.Set(link.X+j, link.Y, ch, style)
 			}
@@ -1442,11 +1446,14 @@ func (r *Renderer) RenderInputLabels(labels []string, inputPrefix string) {
 			if input.X+j < r.canvas.Width() {
 				var style render.Style
 				if !matches && inputPrefix != "" {
-					style = render.Style{Dim: true}
+					style = theme.Current.LabelDim.Style()
 				} else if j < len(inputPrefix) {
-					style = render.Style{Bold: true, FgColor: render.ColorGreen}
+					style = theme.Current.LabelTyped.Style()
+					style.Bold = true
 				} else {
-					style = render.Style{Reverse: true, Bold: true}
+					style = theme.Current.Label.Style()
+					style.Reverse = true
+					style.Bold = true
 				}
 				r.canvas.Set(input.X+j, input.Y, ch, style)
 			}
@@ -1520,11 +1527,14 @@ func (r *Renderer) RenderTOC(labels []string, inputPrefix string) {
 		for j, ch := range label {
 			var style render.Style
 			if !matches && inputPrefix != "" {
-				style = render.Style{Dim: true}
+				style = theme.Current.LabelDim.Style()
 			} else if j < len(inputPrefix) {
-				style = render.Style{Bold: true, FgColor: render.ColorGreen}
+				style = theme.Current.LabelTyped.Style()
+				style.Bold = true
 			} else {
-				style = render.Style{Reverse: true, Bold: true}
+				style = theme.Current.Label.Style()
+				style.Reverse = true
+				style.Bold = true
 			}
 			r.canvas.Set(x+j, y, ch, style)
 		}
@@ -1533,7 +1543,7 @@ func (r *Renderer) RenderTOC(labels []string, inputPrefix string) {
 		line := fmt.Sprintf(" %s  %s", heading.Number, text)
 		textStyle := render.Style{}
 		if !matches && inputPrefix != "" {
-			textStyle.Dim = true
+			textStyle = render.Style{Dim: true}
 		}
 		r.canvas.WriteString(x+len(label), y, line, textStyle)
 
@@ -1624,13 +1634,16 @@ func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int, inputPrefi
 			var style render.Style
 			if !matches && inputPrefix != "" {
 				// Non-matching label - dim it
-				style = render.Style{Dim: true}
+				style = theme.Current.LabelDim.Style()
 			} else if j < len(inputPrefix) {
-				// Typed character - bold green to show it's been entered
-				style = render.Style{Bold: true, FgColor: render.ColorGreen}
+				// Typed character - bold to show it's been entered
+				style = theme.Current.LabelTyped.Style()
+				style.Bold = true
 			} else {
 				// Remaining characters - reverse video
-				style = render.Style{Reverse: true, Bold: true}
+				style = theme.Current.Label.Style()
+				style.Reverse = true
+				style.Bold = true
 			}
 			r.canvas.Set(x+j, y, ch, style)
 		}
@@ -1640,7 +1653,7 @@ func (r *Renderer) RenderLinkIndex(labels []string, scrollOffset int, inputPrefi
 		textStyle := render.Style{}
 		hrefStyle := render.Style{Dim: true}
 		if !matches && inputPrefix != "" {
-			textStyle.Dim = true
+			textStyle = render.Style{Dim: true}
 		}
 		r.canvas.WriteString(x+len(label), y, line, textStyle)
 		r.canvas.WriteString(x+len(label)+render.StringWidth(line), y, href, hrefStyle)
@@ -1798,11 +1811,14 @@ func (r *Renderer) RenderNavigation(navSections []*html.Node, labels []string, s
 			for j, ch := range label {
 				var style render.Style
 				if !matches && inputPrefix != "" {
-					style = render.Style{Dim: true}
+					style = theme.Current.LabelDim.Style()
 				} else if j < len(inputPrefix) {
-					style = render.Style{Bold: true, FgColor: render.ColorGreen}
+					style = theme.Current.LabelTyped.Style()
+					style.Bold = true
 				} else {
-					style = render.Style{Reverse: true, Bold: true}
+					style = theme.Current.Label.Style()
+					style.Reverse = true
+					style.Bold = true
 				}
 				r.canvas.Set(x+j, y, ch, style)
 			}
@@ -1810,8 +1826,7 @@ func (r *Renderer) RenderNavigation(navSections []*html.Node, labels []string, s
 			// Draw link text (dimmed if not matching)
 			textStyle := render.Style{Underline: true}
 			if !matches && inputPrefix != "" {
-				textStyle.Dim = true
-				textStyle.Underline = false
+				textStyle = render.Style{Dim: true}
 			}
 			r.canvas.WriteString(x+len(label)+1, y, text, textStyle)
 		}

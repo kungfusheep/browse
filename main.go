@@ -30,6 +30,7 @@ import (
 	"browse/rules"
 	"browse/search"
 	"browse/session"
+	"browse/theme"
 )
 
 func main() {
@@ -404,6 +405,9 @@ func run(url string) error {
 	favouritesScrollOffset := 0  // scroll position within favourites
 	favouritesDeleteMode := false // waiting for label to delete
 
+	// Theme picker state
+	themePickerMode := false
+
 	// Define navigateTo helper - navigates within current buffer (updates history)
 	navigateTo = func(newURL string, newDoc *html.Document, newHTML string) {
 		buf := getCurrentBuffer()
@@ -643,12 +647,17 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		return parsed.Host
 	}
 
+	// Render canvas to screen with theme colors
+	renderToScreen := func() {
+		canvas.RenderToWithBase(os.Stdout, theme.Current.BaseStyle())
+	}
+
 	// Render helper
 	redraw := func() {
 		// Structure inspector mode - separate rendering
 		if structureMode && structureViewer != nil {
 			structureViewer.Render()
-			canvas.RenderTo(os.Stdout)
+			renderToScreen()
 			return
 		}
 
@@ -761,7 +770,9 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					for _, pos := range defineWordPositions[word] {
 						for j, ch := range label {
 							if pos.X+j < canvas.Width() {
-								style := render.Style{Reverse: true, Bold: true, FgColor: render.ColorYellow}
+								style := theme.Current.Label.Style()
+								style.Bold = true
+								style.Reverse = true
 								canvas.Set(pos.X+j, pos.Y, ch, style)
 							}
 						}
@@ -875,11 +886,14 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				for j, ch := range label {
 					var style render.Style
 					if !matches && jumpInput != "" {
-						style = render.Style{Dim: true}
+						style = theme.Current.LabelDim.Style()
 					} else if j < len(jumpInput) {
-						style = render.Style{Bold: true, FgColor: render.ColorGreen}
+						style = theme.Current.LabelTyped.Style()
+						style.Bold = true
 					} else {
-						style = render.Style{Reverse: true, Bold: true}
+						style = theme.Current.Label.Style()
+						style.Reverse = true
+						style.Bold = true
 					}
 					canvas.Set(bx+j, by, ch, style)
 				}
@@ -982,18 +996,24 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					for j, ch := range label {
 						var style render.Style
 						if favouritesDeleteMode {
-							// Delete mode - show in red
+							// Delete mode - show in error color
 							if j < len(jumpInput) {
-								style = render.Style{Bold: true, FgColor: render.ColorRed}
+								style = theme.Current.Error.Style()
+								style.Bold = true
 							} else {
-								style = render.Style{Bold: true, FgColor: render.ColorRed, Dim: true}
+								style = theme.Current.Error.Style()
+								style.Bold = true
+								style.Dim = true
 							}
 						} else if !matches && jumpInput != "" {
-							style = render.Style{Dim: true}
+							style = theme.Current.LabelDim.Style()
 						} else if j < len(jumpInput) {
-							style = render.Style{Bold: true, FgColor: render.ColorGreen}
+							style = theme.Current.LabelTyped.Style()
+							style.Bold = true
 						} else {
-							style = render.Style{Reverse: true, Bold: true}
+							style = theme.Current.Label.Style()
+							style.Reverse = true
+							style.Bold = true
 						}
 						canvas.Set(bx+j, by, ch, style)
 					}
@@ -1030,6 +1050,104 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			if favouritesDeleteMode {
 				hint = " label=DELETE  ESC=cancel "
 			}
+			hintX := startX + (boxWidth-len(hint))/2
+			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
+		}
+		if themePickerMode {
+			canvas.DimAll()
+
+			// Draw theme picker as centered overlay box
+			boxWidth := 50
+			if boxWidth > width-4 {
+				boxWidth = width - 4
+			}
+			themeCount := len(theme.All)
+			boxHeight := themeCount + 4
+			if boxHeight > height-4 {
+				boxHeight = height - 4
+			}
+			visibleCount := boxHeight - 4
+
+			// Generate labels for visible themes
+			labels = document.GenerateLabels(visibleCount)
+
+			startX := (width - boxWidth) / 2
+			startY := (height - boxHeight) / 2
+
+			// Clear box area
+			for by := startY; by < startY+boxHeight; by++ {
+				for bx := startX; bx < startX+boxWidth; bx++ {
+					canvas.Set(bx, by, ' ', render.Style{})
+				}
+			}
+
+			// Draw border
+			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
+
+			// Title
+			title := " Select Theme "
+			titleX := startX + (boxWidth-len(title))/2
+			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
+
+			// Draw themes with labels
+			by := startY + 2
+			for i := 0; i < themeCount && i < visibleCount; i++ {
+				if i >= len(labels) {
+					break
+				}
+				t := theme.All[i]
+				bx := startX + 2
+
+				// Label
+				label := labels[i]
+				matches := strings.HasPrefix(label, jumpInput)
+
+				// Draw label with typed portion highlighted
+				for j, ch := range label {
+					var style render.Style
+					if !matches && jumpInput != "" {
+						style = theme.Current.LabelDim.Style()
+					} else if j < len(jumpInput) {
+						style = theme.Current.LabelTyped.Style()
+						style.Bold = true
+					} else {
+						style = theme.Current.Label.Style()
+						style.Reverse = true
+						style.Bold = true
+					}
+					canvas.Set(bx+j, by, ch, style)
+				}
+
+				// Theme name
+				displayName := t.Name
+				if t == theme.Current {
+					displayName += " ●" // Indicate current theme
+				}
+				maxLen := boxWidth - len(label) - 6
+				if len(displayName) > maxLen {
+					displayName = displayName[:maxLen-3] + "..."
+				}
+				textStyle := render.Style{}
+				if !matches && jumpInput != "" {
+					textStyle.Dim = true
+				}
+				if t == theme.Current {
+					textStyle.Bold = true
+				}
+				canvas.WriteString(bx+len(label)+2, by, displayName, textStyle)
+
+				// Show light/dark indicator
+				indicator := "◐"
+				if t.Dark {
+					indicator = "◑"
+				}
+				canvas.WriteString(startX+boxWidth-4, by, indicator, render.Style{Dim: true})
+
+				by++
+			}
+
+			// Footer hint
+			hint := " label=select  z=toggle variant  ESC=cancel "
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
@@ -1134,12 +1252,13 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				}
 			}
 
-			// Draw border - green when prefix matched
+			// Draw border - accent when prefix matched
 			boxStyle := render.Style{}
 			titleStyle := render.Style{Bold: true}
 			if matchedPrefix != "" {
-				boxStyle = render.Style{FgColor: render.ColorGreen}
-				titleStyle = render.Style{Bold: true, FgColor: render.ColorGreen}
+				boxStyle = theme.Current.Success.Style()
+				titleStyle = theme.Current.Success.Style()
+				titleStyle.Bold = true
 			}
 			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, boxStyle)
 
@@ -1155,9 +1274,11 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 
 			if matchedPrefix != "" && len(omniInput) >= len(matchedPrefix) {
-				// Draw prefix in green/bold, rest in normal style
+				// Draw prefix in success color/bold, rest in normal style
 				prefixLen := len(matchedPrefix)
-				canvas.WriteString(startX+2, inputY, omniInput[:prefixLen], render.Style{Bold: true, FgColor: render.ColorGreen})
+				prefixStyle := theme.Current.Success.Style()
+				prefixStyle.Bold = true
+				canvas.WriteString(startX+2, inputY, omniInput[:prefixLen], prefixStyle)
 				canvas.WriteString(startX+2+prefixLen, inputY, omniInput[prefixLen:]+"█", render.Style{})
 			} else {
 				canvas.WriteString(startX+2, inputY, displayInput+"█", render.Style{})
@@ -1182,7 +1303,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
 
-		canvas.RenderTo(os.Stdout)
+		renderToScreen()
 	}
 
 	redraw()
@@ -2076,6 +2197,53 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			continue
 		}
 
+		// Theme picker mode input handling
+		if themePickerMode {
+			switch {
+			case buf[0] == 27: // Escape - cancel theme picker
+				themePickerMode = false
+				jumpInput = ""
+				redraw()
+
+			case buf[0] == 'z': // Toggle light/dark variant
+				theme.Toggle()
+				redraw()
+
+			case buf[0] >= 'a' && buf[0] <= 'z' && buf[0] != 'z':
+				jumpInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				for i, label := range labels {
+					if label == jumpInput && i < len(theme.All) {
+						matched = true
+						theme.Current = theme.All[i]
+						themePickerMode = false
+						jumpInput = ""
+						redraw()
+						break
+					}
+				}
+
+				// If no exact match, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, jumpInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						// Invalid input, reset
+						jumpInput = ""
+					}
+					redraw()
+				}
+			}
+			continue
+		}
+
 		// URL input mode handling
 		if urlMode {
 			switch {
@@ -2567,13 +2735,13 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					// Show brief confirmation
 					canvas.Clear()
 					canvas.WriteString(width/2-10, height/2, "Added to favourites!", render.Style{Bold: true})
-					canvas.RenderTo(os.Stdout)
+					renderToScreen()
 					time.Sleep(300 * time.Millisecond)
 				} else {
 					// Already exists
 					canvas.Clear()
 					canvas.WriteString(width/2-12, height/2, "Already in favourites", render.Style{Dim: true})
-					canvas.RenderTo(os.Stdout)
+					renderToScreen()
 					time.Sleep(300 * time.Millisecond)
 				}
 				redraw()
@@ -2594,6 +2762,15 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			if scrollY > maxScroll {
 				scrollY = maxScroll
 			}
+			redraw()
+
+		case key(buf[0], kb.ToggleTheme): // toggle light/dark theme
+			theme.Toggle()
+			redraw()
+
+		case key(buf[0], kb.ThemePicker): // open theme picker
+			themePickerMode = true
+			jumpInput = ""
 			redraw()
 
 		case key(buf[0], kb.StructureInspector): // structure inspector
@@ -2871,7 +3048,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						} else {
 							canvas.WriteString(width/2-12, height/2, "Rules generated (unverified)", render.Style{Bold: true})
 						}
-						canvas.RenderTo(os.Stdout)
+						renderToScreen()
 						time.Sleep(500 * time.Millisecond)
 
 						// Update current buffer with the new parsed document
@@ -2890,14 +3067,14 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						errMsg := err.Error()
 						if strings.Contains(errMsg, "default parser") {
 							canvas.WriteString(width/2-18, height/2, "Default parser works best for this site", render.Style{Dim: true})
-							canvas.RenderTo(os.Stdout)
+							renderToScreen()
 							time.Sleep(1 * time.Second)
 						} else {
 							if len(errMsg) > width-4 {
 								errMsg = errMsg[:width-7] + "..."
 							}
 							canvas.WriteString(2, height/2, "Error: "+errMsg, render.Style{Bold: true})
-							canvas.RenderTo(os.Stdout)
+							renderToScreen()
 							time.Sleep(2 * time.Second)
 						}
 					}
@@ -2930,7 +3107,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				statusY := height - 1
 				msg := "URL copied to clipboard"
 				canvas.WriteString(0, statusY, msg, render.Style{Bold: true})
-				canvas.RenderTo(os.Stdout)
+				renderToScreen()
 				time.Sleep(800 * time.Millisecond)
 			}
 			redraw()
@@ -3053,7 +3230,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				}
 				canvas.WriteString(2, height/2+1, errMsg, render.Style{})
 				canvas.WriteString(2, height/2+3, "Press any key to continue with previous config", render.Style{Dim: true})
-				canvas.RenderTo(os.Stdout)
+				renderToScreen()
 				// Wait for keypress
 				keyBuf := make([]byte, 1)
 				os.Stdin.Read(keyBuf)
@@ -3090,7 +3267,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				// Show success briefly
 				canvas.Clear()
 				canvas.WriteString(width/2-10, height/2, "Config reloaded!", render.Style{Bold: true})
-				canvas.RenderTo(os.Stdout)
+				renderToScreen()
 				time.Sleep(300 * time.Millisecond)
 			}
 			redraw()
@@ -3137,7 +3314,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					renderer.Render(doc, scrollY)
 					statusY := height - 1
 					canvas.WriteString(0, statusY, "Opened in browser", render.Style{Bold: true})
-					canvas.RenderTo(os.Stdout)
+					renderToScreen()
 					time.Sleep(500 * time.Millisecond)
 				}
 				redraw()
@@ -3804,8 +3981,10 @@ func withSpinner[T any](canvas *render.Canvas, message string, work func(ctx con
 				cancel()
 				// Show cancelled message briefly
 				canvas.Clear()
-				loader.DrawBox(canvas, "Cancelled")
-				canvas.RenderTo(os.Stdout)
+				accentStyle := theme.Current.Accent.Style()
+				accentStyle.Bold = true
+				loader.DrawBoxStyled(canvas, "Cancelled", accentStyle)
+				canvas.RenderToWithBase(os.Stdout, theme.Current.BaseStyle())
 				time.Sleep(200 * time.Millisecond)
 				// Wait for goroutine to finish and return its result
 				return <-resultCh
@@ -3813,8 +3992,10 @@ func withSpinner[T any](canvas *render.Canvas, message string, work func(ctx con
 		case <-ticker.C:
 			loader.Tick()
 			canvas.Clear()
-			loader.DrawBox(canvas, "")
-			canvas.RenderTo(os.Stdout)
+			accentStyle := theme.Current.Accent.Style()
+			accentStyle.Bold = true
+			loader.DrawBoxStyled(canvas, "", accentStyle)
+			canvas.RenderToWithBase(os.Stdout, theme.Current.BaseStyle())
 		}
 	}
 }

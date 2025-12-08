@@ -158,6 +158,11 @@ func (ld *LoadingDisplay) Draw(c *Canvas) {
 
 // DrawBox renders the loading display in a centered box.
 func (ld *LoadingDisplay) DrawBox(c *Canvas, title string) {
+	ld.DrawBoxStyled(c, title, Style{Bold: true, FgColor: ColorCyan})
+}
+
+// DrawBoxStyled renders the loading display in a centered box with custom spinner style.
+func (ld *LoadingDisplay) DrawBoxStyled(c *Canvas, title string, spinnerStyle Style) {
 	width := c.Width()
 	height := c.Height()
 
@@ -199,7 +204,7 @@ func (ld *LoadingDisplay) DrawBox(c *Canvas, title string) {
 	contentY := startY + 2
 
 	spinnerWidth := ld.spinner.Width()
-	c.WriteString(contentX, contentY, spinnerFrame, Style{Bold: true, FgColor: ColorCyan})
+	c.WriteString(contentX, contentY, spinnerFrame, spinnerStyle)
 	c.WriteString(contentX+spinnerWidth+1, contentY, ld.message, Style{})
 }
 

@@ -57,6 +57,16 @@ func (c *Canvas) Clear() {
 	}
 }
 
+// ClearWithStyle fills the entire canvas with spaces using the given style.
+// Use this to set a background color for the entire canvas.
+func (c *Canvas) ClearWithStyle(style Style) {
+	for y := range c.cells {
+		for x := range c.cells[y] {
+			c.cells[y][x] = Cell{Rune: ' ', Style: style}
+		}
+	}
+}
+
 // DimAll applies the Dim style to all cells, greying out the canvas content.
 func (c *Canvas) DimAll() {
 	for y := range c.cells {
@@ -160,18 +170,40 @@ func (c *Canvas) DrawBoxWithTitle(x, y, width, height int, title string, box Box
 
 // Render outputs the canvas as a string with ANSI escape codes.
 func (c *Canvas) Render() string {
+	return c.RenderWithBase(Style{})
+}
+
+// RenderWithBase outputs the canvas with a base style (background/foreground).
+// The base style colors are used as defaults when cells don't specify colors.
+func (c *Canvas) RenderWithBase(base Style) string {
 	var sb strings.Builder
 	sb.WriteString("\033[H")
 
-	var currentStyle Style
+	// Set initial base style if it has colors
+	if base.UseBgRGB || base.UseFgRGB {
+		sb.WriteString(styleSequence(base))
+	}
+
+	var currentStyle Style = base
 
 	for y := 0; y < c.height; y++ {
 		for x := 0; x < c.width; x++ {
 			cell := c.cells[y][x]
 
-			if cell.Style != currentStyle {
-				sb.WriteString(styleSequence(cell.Style))
-				currentStyle = cell.Style
+			// Merge cell style with base style for colors
+			effectiveStyle := cell.Style
+			if base.UseBgRGB && !effectiveStyle.UseBgRGB {
+				effectiveStyle.UseBgRGB = true
+				effectiveStyle.BgRGB = base.BgRGB
+			}
+			if base.UseFgRGB && !effectiveStyle.UseFgRGB {
+				effectiveStyle.UseFgRGB = true
+				effectiveStyle.FgRGB = base.FgRGB
+			}
+
+			if effectiveStyle != currentStyle {
+				sb.WriteString(styleSequence(effectiveStyle))
+				currentStyle = effectiveStyle
 			}
 
 			sb.WriteRune(cell.Rune)
@@ -199,11 +231,14 @@ func styleSequence(s Style) string {
 	if s.Reverse {
 		codes = append(codes, "7")
 	}
-	if s.FgColor > 0 {
+	if s.UseFgRGB {
+		// True color foreground: 38;2;R;G;B
+		codes = append(codes, fmt.Sprintf("38;2;%d;%d;%d", s.FgRGB[0], s.FgRGB[1], s.FgRGB[2]))
+	} else if s.FgColor > 0 {
 		codes = append(codes, fmt.Sprintf("%d", s.FgColor))
 	}
 	if s.UseBgRGB {
-		// True color: 48;2;R;G;B
+		// True color background: 48;2;R;G;B
 		codes = append(codes, fmt.Sprintf("48;2;%d;%d;%d", s.BgRGB[0], s.BgRGB[1], s.BgRGB[2]))
 	} else if s.BgColor > 0 {
 		codes = append(codes, fmt.Sprintf("%d", s.BgColor))
@@ -214,6 +249,12 @@ func styleSequence(s Style) string {
 // RenderTo writes the canvas to the given file.
 func (c *Canvas) RenderTo(w *os.File) error {
 	_, err := w.WriteString(c.Render())
+	return err
+}
+
+// RenderToWithBase writes the canvas with a base style to the given file.
+func (c *Canvas) RenderToWithBase(w *os.File, base Style) error {
+	_, err := w.WriteString(c.RenderWithBase(base))
 	return err
 }
 

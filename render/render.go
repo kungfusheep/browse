@@ -31,6 +31,8 @@ type Style struct {
 	Reverse   bool
 	FgColor   int      // ANSI foreground color code (0 = default, 32 = green, 33 = yellow, etc.)
 	BgColor   int      // ANSI background color code (0 = default, 40-47 = colors)
+	FgRGB     [3]uint8 // True color foreground RGB values
+	UseFgRGB  bool     // Use FgRGB instead of FgColor
 	BgRGB     [3]uint8 // True color background RGB values
 	UseBgRGB  bool     // Use BgRGB instead of BgColor
 }

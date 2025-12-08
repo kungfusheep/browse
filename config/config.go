@@ -99,6 +99,8 @@ type Keybindings struct {
 	Home               string `json:"home"`
 	StructureInspector string `json:"structureInspector"`
 	ToggleWideMode     string `json:"toggleWideMode"`
+	ToggleTheme        string `json:"toggleTheme"`  // toggle light/dark theme
+	ThemePicker        string `json:"themePicker"`  // open theme picker
 	InputField         string `json:"inputField"`
 	ReloadWithJs       string `json:"reloadWithJs"`
 	GenerateRules      string `json:"generateRules"`
@@ -179,6 +181,8 @@ func Default() *Config {
 			Home:               "H",
 			StructureInspector: "s",
 			ToggleWideMode:     "w",
+			ToggleTheme:        "z",
+			ThemePicker:        "P",
 			InputField:         "i",
 			ReloadWithJs:       "r",
 			GenerateRules:      "R",
@@ -337,6 +341,8 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.Home, user.Keybindings.Home)
 	mergeKeybinding(&result.Keybindings.StructureInspector, user.Keybindings.StructureInspector)
 	mergeKeybinding(&result.Keybindings.ToggleWideMode, user.Keybindings.ToggleWideMode)
+	mergeKeybinding(&result.Keybindings.ToggleTheme, user.Keybindings.ToggleTheme)
+	mergeKeybinding(&result.Keybindings.ThemePicker, user.Keybindings.ThemePicker)
 	mergeKeybinding(&result.Keybindings.InputField, user.Keybindings.InputField)
 	mergeKeybinding(&result.Keybindings.ReloadWithJs, user.Keybindings.ReloadWithJs)
 	mergeKeybinding(&result.Keybindings.GenerateRules, user.Keybindings.GenerateRules)
