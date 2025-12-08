@@ -192,3 +192,62 @@ func TestBeforeAfterCursor(t *testing.T) {
 		t.Errorf("expected 'llo', got %q", e.AfterCursor())
 	}
 }
+
+// TestWordVsBigWordMovement tests the difference between word (w/b/e) and WORD (W/B/E) motions.
+// word motions stop at punctuation boundaries, WORD motions only stop at whitespace.
+func TestWordVsBigWordMovement(t *testing.T) {
+	e := New()
+	// With punctuation: "hello.world" should be one WORD but multiple words
+	e.Set("hello.world test")
+
+	// Small 'w' - word motion stops at punctuation
+	e.Home()
+	e.WordRight() // Should stop at '.'
+	if e.Cursor() != 5 {
+		t.Errorf("WordRight (w): expected cursor at 5 (before '.'), got %d", e.Cursor())
+	}
+
+	// Big 'W' - WORD motion crosses punctuation, stops at space
+	e.Home()
+	e.BigWordRight() // Should stop at 't' (after "hello.world ")
+	if e.Cursor() != 12 {
+		t.Errorf("BigWordRight (W): expected cursor at 12 (start of 'test'), got %d", e.Cursor())
+	}
+
+	// Test 'b' vs 'B' backward motions
+	e.End() // cursor at 16
+	e.BigWordLeft() // Should stop at 't' of "test"
+	if e.Cursor() != 12 {
+		t.Errorf("BigWordLeft (B): expected cursor at 12, got %d", e.Cursor())
+	}
+
+	e.BigWordLeft() // Should stop at 'h' of "hello.world"
+	if e.Cursor() != 0 {
+		t.Errorf("BigWordLeft (B): expected cursor at 0, got %d", e.Cursor())
+	}
+
+	e.End()
+	e.WordLeft() // Should stop at 't' of "test"
+	if e.Cursor() != 12 {
+		t.Errorf("WordLeft (b): expected cursor at 12, got %d", e.Cursor())
+	}
+
+	e.WordLeft() // Should stop at 'w' of "world" (after punctuation)
+	if e.Cursor() != 6 {
+		t.Errorf("WordLeft (b): expected cursor at 6, got %d", e.Cursor())
+	}
+
+	// Test 'e' vs 'E' end motions
+	e.Set("foo.bar baz")
+	e.Home()
+	e.WordEnd() // Should stop at 'o' (end of "foo")
+	if e.Cursor() != 2 {
+		t.Errorf("WordEnd (e): expected cursor at 2 (end of 'foo'), got %d", e.Cursor())
+	}
+
+	e.Home()
+	e.BigWordEnd() // Should stop at 'r' (end of "foo.bar")
+	if e.Cursor() != 6 {
+		t.Errorf("BigWordEnd (E): expected cursor at 6 (end of 'foo.bar'), got %d", e.Cursor())
+	}
+}

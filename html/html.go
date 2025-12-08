@@ -88,6 +88,8 @@ const (
 	NodeText
 	NodeStrong
 	NodeEmphasis
+	NodeMark       // Highlighted/marked text (renders with reverse video)
+	NodeMarkInsert // Insert-mode cursor (renders with reverse video + color)
 	NodeForm
 	NodeInput
 	NodeNavSection // A navigation section (from nav, header, footer)
@@ -975,6 +977,16 @@ func extractInline(n *html.Node, parent *Node) {
 
 			case "em", "i":
 				node := &Node{Type: NodeEmphasis}
+				extractInline(c, node)
+				parent.Children = append(parent.Children, node)
+
+			case "mark":
+				node := &Node{Type: NodeMark}
+				extractInline(c, node)
+				parent.Children = append(parent.Children, node)
+
+			case "ins":
+				node := &Node{Type: NodeMarkInsert}
 				extractInline(c, node)
 				parent.Children = append(parent.Children, node)
 

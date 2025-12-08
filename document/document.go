@@ -653,6 +653,16 @@ func (r *Renderer) extractSpansRecursive(n *html.Node, style render.Style, href 
 			emStyle := style
 			emStyle.Underline = true
 			r.extractSpansRecursive(child, emStyle, href, spans)
+		case html.NodeMark:
+			markStyle := style
+			markStyle.Reverse = true
+			markStyle.FgColor = render.ColorWhite
+			r.extractSpansRecursive(child, markStyle, href, spans)
+		case html.NodeMarkInsert:
+			insertStyle := style
+			insertStyle.Reverse = true
+			insertStyle.FgColor = render.ColorWhite
+			r.extractSpansRecursive(child, insertStyle, href, spans)
 		case html.NodeCode:
 			codeStyle := style
 			codeStyle.Dim = true

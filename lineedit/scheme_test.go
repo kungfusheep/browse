@@ -766,6 +766,40 @@ func TestVimRedo(t *testing.T) {
 	}
 }
 
+func TestVimReplaceChar(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test r - replace single char
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'r'}, 1)
+	s.HandleKey(e, []byte{'x'}, 1)
+	if e.Text() != "xello" {
+		t.Errorf("r should replace char, got %q", e.Text())
+	}
+
+	// Test 3rx - replace 3 chars with x
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'3'}, 1)
+	s.HandleKey(e, []byte{'r'}, 1)
+	s.HandleKey(e, []byte{'x'}, 1)
+	if e.Text() != "xxxlo" {
+		t.Errorf("3r should replace 3 chars, got %q", e.Text())
+	}
+
+	// Test r with undo
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'r'}, 1)
+	s.HandleKey(e, []byte{'x'}, 1)
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "hello" {
+		t.Errorf("u should undo r, got %q", e.Text())
+	}
+}
+
 func TestEmacsRedo(t *testing.T) {
 	e := New()
 	s := NewEmacsScheme()
@@ -788,5 +822,514 @@ func TestEmacsRedo(t *testing.T) {
 	s.HandleKey(e, []byte{25}, 1)
 	if e.Text() != "hello " {
 		t.Errorf("Ctrl+Y should redo, got %q", e.Text())
+	}
+}
+
+func TestVimFindForward(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test f - find forward (inclusive)
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Cursor() != 4 { // first 'o' in "hello"
+		t.Errorf("fo should find first 'o', cursor at %d expected 4", e.Cursor())
+	}
+
+	// Find next 'o' with 2fo
+	e.Home()
+	s.HandleKey(e, []byte{'2'}, 1)
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Cursor() != 7 { // 'o' in "world"
+		t.Errorf("2fo should find second 'o', cursor at %d expected 7", e.Cursor())
+	}
+
+	// Target not found - cursor shouldn't move
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{'z'}, 1)
+	if e.Cursor() != 0 {
+		t.Errorf("fz on 'hello' should not move cursor, at %d", e.Cursor())
+	}
+}
+
+func TestVimFindBackward(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test F - find backward (inclusive)
+	e.Set("hello world")
+	e.End()
+	s.HandleKey(e, []byte{'F'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Cursor() != 7 { // 'o' in "world"
+		t.Errorf("Fo should find 'o' backward, cursor at %d expected 7", e.Cursor())
+	}
+
+	// Find 2nd 'o' backward with 2Fo
+	e.End()
+	s.HandleKey(e, []byte{'2'}, 1)
+	s.HandleKey(e, []byte{'F'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Cursor() != 4 { // 'o' in "hello"
+		t.Errorf("2Fo should find second 'o' backward, cursor at %d expected 4", e.Cursor())
+	}
+}
+
+func TestVimFindForwardBefore(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test t - find forward, stop before (exclusive)
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'t'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Cursor() != 3 { // one before first 'o' in "hello"
+		t.Errorf("to should stop before 'o', cursor at %d expected 3", e.Cursor())
+	}
+}
+
+func TestVimFindBackwardAfter(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test T - find backward, stop after (exclusive)
+	e.Set("hello world")
+	e.End()
+	s.HandleKey(e, []byte{'T'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Cursor() != 8 { // one after 'o' in "world"
+		t.Errorf("To should stop after 'o', cursor at %d expected 8", e.Cursor())
+	}
+}
+
+func TestVimDeleteWithFind(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test df - delete forward to and including char
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Text() != " world" {
+		t.Errorf("dfo should delete up to and including 'o', got %q", e.Text())
+	}
+
+	// Test dt - delete forward up to but not including char
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'t'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Text() != "o world" {
+		t.Errorf("dto should delete up to but not including 'o', got %q", e.Text())
+	}
+
+	// Test dF - delete backward to and including char
+	e.Set("hello world")
+	e.End()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'F'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Text() != "hello w" {
+		t.Errorf("dFo should delete backward to 'o', got %q", e.Text())
+	}
+
+	// Test dT - delete backward up to but not including char
+	e.Set("hello world")
+	e.End()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'T'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Text() != "hello wo" {
+		t.Errorf("dTo should delete backward after 'o', got %q", e.Text())
+	}
+}
+
+func TestVimChangeWithFind(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test cf - change forward to and including char
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'c'}, 1)
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{' '}, 1) // change to space
+	if e.Text() != "world" {
+		t.Errorf("cf<space> should delete to space, got %q", e.Text())
+	}
+	if !s.InInsertMode() {
+		t.Error("cf should enter insert mode")
+	}
+
+	// Type replacement
+	for _, ch := range "hi " {
+		s.HandleKey(e, []byte{byte(ch)}, 1)
+	}
+	if e.Text() != "hi world" {
+		t.Errorf("after cf and typing, got %q", e.Text())
+	}
+}
+
+func TestVimFindWithUndo(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test that df can be undone
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{'o'}, 1)
+	if e.Text() != " world" {
+		t.Errorf("dfo should delete, got %q", e.Text())
+	}
+
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "hello world" {
+		t.Errorf("u should undo dfo, got %q", e.Text())
+	}
+	if e.Cursor() != 0 {
+		t.Errorf("undo should restore cursor to 0, got %d", e.Cursor())
+	}
+}
+
+func TestVimRepeatSimple(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats x
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'x'}, 1)
+	if e.Text() != "ello" {
+		t.Errorf("x should delete char, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "llo" {
+		t.Errorf(". should repeat x, got %q", e.Text())
+	}
+
+	// Test . repeats 2x
+	e.Set("hello world")
+	e.Home()
+	s.HandleKey(e, []byte{'2'}, 1)
+	s.HandleKey(e, []byte{'x'}, 1)
+	if e.Text() != "llo world" {
+		t.Errorf("2x should delete 2 chars, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "o world" {
+		t.Errorf(". should repeat 2x, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatDelete(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats dw
+	e.Set("one two three four")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != "two three four" {
+		t.Errorf("dw should delete word, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "three four" {
+		t.Errorf(". should repeat dw, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "four" {
+		t.Errorf(". should repeat dw again, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatDeleteWithFind(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats df
+	e.Set("a=1, b=2, c=3, d=4")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'f'}, 1)
+	s.HandleKey(e, []byte{' '}, 1)
+	if e.Text() != "b=2, c=3, d=4" {
+		t.Errorf("df should delete to space, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "c=3, d=4" {
+		t.Errorf(". should repeat df, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatChange(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats cw + typed text
+	e.Set("foo bar baz")
+	e.Home()
+	s.HandleKey(e, []byte{'c'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	// Type "hello "
+	for _, ch := range "hello " {
+		s.HandleKey(e, []byte{byte(ch)}, 1)
+	}
+	s.HandleKey(e, []byte{27}, 1) // Escape
+	if e.Text() != "hello bar baz" {
+		t.Errorf("cw + 'hello ' should give 'hello bar baz', got %q", e.Text())
+	}
+
+	// Cursor is now on 'b' of "bar" (after vim left-move on Escape)
+	e.SetCursor(6) // Move to 'b' of "bar"
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "hello hello baz" {
+		t.Errorf(". should repeat cw + typed text, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatReplace(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats r
+	e.Set("hello")
+	e.Home()
+	s.HandleKey(e, []byte{'r'}, 1)
+	s.HandleKey(e, []byte{'X'}, 1)
+	if e.Text() != "Xello" {
+		t.Errorf("rX should replace first char, got %q", e.Text())
+	}
+	s.HandleKey(e, []byte{'l'}, 1) // move right
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "XXllo" {
+		t.Errorf(". should repeat rX, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatInsert(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats i + typed text
+	e.Set("world")
+	e.Home()
+	s.HandleKey(e, []byte{'i'}, 1)
+	for _, ch := range "hello " {
+		s.HandleKey(e, []byte{byte(ch)}, 1)
+	}
+	s.HandleKey(e, []byte{27}, 1) // Escape
+	if e.Text() != "hello world" {
+		t.Errorf("i + 'hello ' should give 'hello world', got %q", e.Text())
+	}
+
+	// Now . should insert "hello " again
+	e.End()
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "hello worldhello " {
+		t.Errorf(". should repeat insert, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatTextObject(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test . repeats diw
+	e.Set("one two three")
+	e.SetCursor(0) // on "one"
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'i'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != " two three" {
+		t.Errorf("diw should delete 'one', got %q", e.Text())
+	}
+
+	// Cursor at start, which is now on space
+	e.SetCursor(1) // on "two"
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "  three" {
+		t.Errorf(". should repeat diw, got %q", e.Text())
+	}
+}
+
+func TestVimRepeatWithUndo(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test that repeated changes can be undone
+	e.Set("one two three")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	s.HandleKey(e, []byte{'.'}, 1)
+	if e.Text() != "three" {
+		t.Errorf("dw . should delete 2 words, got %q", e.Text())
+	}
+
+	// Undo the repeat
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "two three" {
+		t.Errorf("u should undo the repeat, got %q", e.Text())
+	}
+
+	// Undo the original
+	s.HandleKey(e, []byte{'u'}, 1)
+	if e.Text() != "one two three" {
+		t.Errorf("u should undo the original, got %q", e.Text())
+	}
+}
+
+// TestVimBigWordMotions tests W/B/E motions (WORD vs word)
+func TestVimBigWordMotions(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test W motion - should skip over punctuation
+	e.Set("foo.bar baz")
+	e.Home()
+	s.HandleKey(e, []byte{'W'}, 1)
+	if e.Cursor() != 8 { // start of "baz"
+		t.Errorf("W should move to next WORD at 8, got %d", e.Cursor())
+	}
+
+	// Test w motion for comparison - stops at punctuation
+	e.Home()
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Cursor() != 3 { // at "."
+		t.Errorf("w should stop at punctuation at 3, got %d", e.Cursor())
+	}
+
+	// Test B motion - backward WORD
+	e.End()
+	s.HandleKey(e, []byte{'B'}, 1)
+	if e.Cursor() != 8 { // start of "baz"
+		t.Errorf("B should move back to WORD start at 8, got %d", e.Cursor())
+	}
+	s.HandleKey(e, []byte{'B'}, 1)
+	if e.Cursor() != 0 { // start of "foo.bar"
+		t.Errorf("B should move back to WORD start at 0, got %d", e.Cursor())
+	}
+
+	// Test E motion - end of WORD
+	e.Home()
+	s.HandleKey(e, []byte{'E'}, 1)
+	if e.Cursor() != 6 { // end of "foo.bar" (the 'r')
+		t.Errorf("E should move to end of WORD at 6, got %d", e.Cursor())
+	}
+
+	// Test e motion for comparison - stops at end of word
+	e.Home()
+	s.HandleKey(e, []byte{'e'}, 1)
+	if e.Cursor() != 2 { // end of "foo" (the second 'o')
+		t.Errorf("e should stop at end of word at 2, got %d", e.Cursor())
+	}
+}
+
+// TestVimTextObjectWordWithPunctuation tests iw/aw text objects with punctuation
+func TestVimTextObjectWordWithPunctuation(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// ciw on 's' in "editor...so" should only delete "so", not the dots
+	e.Set("editor...so")
+	e.SetCursor(9) // on 's'
+	s.HandleKey(e, []byte{'c'}, 1)
+	s.HandleKey(e, []byte{'i'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != "editor..." {
+		t.Errorf("ciw on 's' in 'editor...so': expected 'editor...', got %q", e.Text())
+	}
+
+	// diw on '.' should only delete the dots, not the words
+	e = New()
+	s = NewVimScheme()
+	e.Set("editor...so")
+	e.SetCursor(6) // on first '.'
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'i'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != "editorso" {
+		t.Errorf("diw on '.' in 'editor...so': expected 'editorso', got %q", e.Text())
+	}
+
+	// diw on 'e' should only delete "editor", not the dots
+	e = New()
+	s = NewVimScheme()
+	e.Set("editor...so")
+	e.SetCursor(0) // on 'e'
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'i'}, 1)
+	s.HandleKey(e, []byte{'w'}, 1)
+	if e.Text() != "...so" {
+		t.Errorf("diw on 'e' in 'editor...so': expected '...so', got %q", e.Text())
+	}
+}
+
+// TestVimBigWordWithOperators tests W/B/E with operators (dW, cE, etc.)
+func TestVimBigWordWithOperators(t *testing.T) {
+	e := New()
+	s := NewVimScheme()
+
+	// Test dW - delete WORD
+	e.Set("foo.bar baz qux")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'W'}, 1)
+	if e.Text() != "baz qux" {
+		t.Errorf("dW should delete 'foo.bar ', got %q", e.Text())
+	}
+
+	// Test cW - change WORD
+	e.Set("hello.world test")
+	e.Home()
+	s.HandleKey(e, []byte{'c'}, 1)
+	s.HandleKey(e, []byte{'W'}, 1)
+	// Should be in insert mode now
+	if !s.InInsertMode() {
+		t.Error("cW should enter insert mode")
+	}
+	if e.Text() != "test" {
+		t.Errorf("cW should delete WORD, got %q", e.Text())
+	}
+	// Type replacement text
+	for _, ch := range "new" {
+		s.HandleKey(e, []byte{byte(ch)}, 1)
+	}
+	if e.Text() != "newtest" {
+		t.Errorf("after cW + typing 'new', got %q", e.Text())
+	}
+
+	// Exit insert mode
+	s.HandleKey(e, []byte{27}, 1)
+
+	// Test dE - delete to end of WORD (inclusive)
+	e.Set("foo.bar baz")
+	e.Home()
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'E'}, 1)
+	if e.Text() != " baz" {
+		t.Errorf("dE should delete 'foo.bar', got %q", e.Text())
+	}
+
+	// Test 2dW - delete 2 WORDs
+	e.Set("one.two three.four five")
+	e.Home()
+	s.HandleKey(e, []byte{'2'}, 1)
+	s.HandleKey(e, []byte{'d'}, 1)
+	s.HandleKey(e, []byte{'W'}, 1)
+	if e.Text() != "five" {
+		t.Errorf("2dW should delete 2 WORDs, got %q", e.Text())
 	}
 }

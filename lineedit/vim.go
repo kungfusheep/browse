@@ -19,6 +19,45 @@ const (
 	OpYank             // y (for future use)
 )
 
+// VimFindType represents the type of character find motion.
+type VimFindType int
+
+const (
+	FindNone VimFindType = iota
+	FindForward        // f - find forward (inclusive)
+	FindBackward       // F - find backward (inclusive)
+	FindForwardBefore  // t - find forward, stop before (exclusive)
+	FindBackwardAfter  // T - find backward, stop after (exclusive)
+)
+
+// VimChangeType represents the type of change for repeat (.).
+type VimChangeType int
+
+const (
+	ChangeNone VimChangeType = iota
+	ChangeSimple             // x, X, D, S, dd, cc
+	ChangeMotion             // dw, de, cw, etc.
+	ChangeTextObj            // diw, ciq, etc.
+	ChangeFind               // df., ct", etc.
+	ChangeReplace            // r
+	ChangeInsert             // i, a, I, A (insert typed text)
+)
+
+// lastChange records the last change for repeat (.).
+type lastChange struct {
+	changeType VimChangeType
+	count      int         // count used
+	operator   VimOperator // d, c, y
+	motion     byte        // w, e, $, 0, etc.
+	findType   VimFindType // f, F, t, T
+	findChar   byte        // target character for find
+	textObj    byte        // w, ", ', q, s, etc.
+	inner      bool        // inner vs around for text objects
+	replaceChar byte       // replacement char for r
+	simpleCmd  byte        // x, X, D, S
+	insertText string      // text typed in insert mode (for change commands)
+}
+
 // VimScheme implements vim-style modal keybindings.
 type VimScheme struct {
 	mode           VimMode
@@ -27,11 +66,353 @@ type VimScheme struct {
 	countBuf       string      // Buffer for building count
 	textObjPending bool        // Waiting for text object type (w, ", ', etc.)
 	textObjInner   bool        // true = inner (i), false = around (a)
+	replacePending bool        // Waiting for replacement character (after 'r')
+	findPending    VimFindType // Waiting for find target character
+
+	// For recording changes (for . repeat)
+	lastChange     lastChange // The last recorded change
+	insertBuffer   string     // Buffer for text typed in insert mode
+	recording      bool       // Whether we're recording insert text
 }
 
 // NewVimScheme creates a new vim keybinding scheme in normal mode.
 func NewVimScheme() *VimScheme {
 	return &VimScheme{mode: VimNormal}
+}
+
+// recordSimpleChange records a simple command (x, X, D, S) for repeat.
+func (s *VimScheme) recordSimpleChange(cmd byte, count int) {
+	s.lastChange = lastChange{
+		changeType: ChangeSimple,
+		count:      count,
+		simpleCmd:  cmd,
+	}
+}
+
+// recordMotionChange records an operator+motion change for repeat.
+func (s *VimScheme) recordMotionChange(op VimOperator, motion byte, count int) {
+	s.lastChange = lastChange{
+		changeType: ChangeMotion,
+		count:      count,
+		operator:   op,
+		motion:     motion,
+	}
+}
+
+// recordTextObjChange records an operator+text object change for repeat.
+func (s *VimScheme) recordTextObjChange(op VimOperator, obj byte, inner bool, count int) {
+	s.lastChange = lastChange{
+		changeType: ChangeTextObj,
+		count:      count,
+		operator:   op,
+		textObj:    obj,
+		inner:      inner,
+	}
+}
+
+// recordFindChange records an operator+find change for repeat.
+func (s *VimScheme) recordFindChange(op VimOperator, findType VimFindType, findChar byte, count int) {
+	s.lastChange = lastChange{
+		changeType: ChangeFind,
+		count:      count,
+		operator:   op,
+		findType:   findType,
+		findChar:   findChar,
+	}
+}
+
+// recordReplaceChange records a replace command for repeat.
+func (s *VimScheme) recordReplaceChange(replaceChar byte, count int) {
+	s.lastChange = lastChange{
+		changeType:  ChangeReplace,
+		count:       count,
+		replaceChar: replaceChar,
+	}
+}
+
+// startInsertRecording starts recording text for an insert-type change.
+func (s *VimScheme) startInsertRecording(cmd byte, count int) {
+	s.lastChange = lastChange{
+		changeType: ChangeInsert,
+		count:      count,
+		simpleCmd:  cmd,
+	}
+	s.insertBuffer = ""
+	s.recording = true
+}
+
+// startChangeRecording starts recording for a change operator.
+func (s *VimScheme) startChangeRecording() {
+	s.insertBuffer = ""
+	s.recording = true
+}
+
+// repeatLastChange replays the last recorded change.
+func (s *VimScheme) repeatLastChange(e *Editor) Event {
+	lc := s.lastChange
+	if lc.changeType == ChangeNone {
+		return Event{Consumed: true}
+	}
+
+	// Use . count if provided, otherwise use original count
+	cnt := s.getCount()
+	if cnt == 1 && lc.count > 1 {
+		cnt = lc.count
+	}
+	s.resetState()
+
+	switch lc.changeType {
+	case ChangeSimple:
+		e.SaveState()
+		switch lc.simpleCmd {
+		case 'x':
+			for i := 0; i < cnt; i++ {
+				e.DeleteForward()
+			}
+		case 'X':
+			for i := 0; i < cnt; i++ {
+				e.DeleteBackward()
+			}
+		case 'D':
+			e.KillToEnd()
+		case 'S':
+			e.Clear()
+			e.InsertString(lc.insertText)
+		case 's':
+			for i := 0; i < cnt; i++ {
+				e.DeleteForward()
+			}
+			e.InsertString(lc.insertText)
+		case 'C':
+			e.KillToEnd()
+			e.InsertString(lc.insertText)
+		}
+		return Event{Consumed: true, TextChanged: true}
+
+	case ChangeMotion:
+		e.SaveState()
+		return s.replayMotionChange(e, lc, cnt)
+
+	case ChangeTextObj:
+		e.SaveState()
+		return s.replayTextObjChange(e, lc)
+
+	case ChangeFind:
+		e.SaveState()
+		return s.replayFindChange(e, lc, cnt)
+
+	case ChangeReplace:
+		e.SaveState()
+		for i := 0; i < cnt && e.Cursor() < e.Len(); i++ {
+			e.DeleteForward()
+			e.Insert(lc.replaceChar)
+		}
+		e.Left()
+		return Event{Consumed: true, TextChanged: true}
+
+	case ChangeInsert:
+		e.SaveState()
+		// Move cursor based on original insert command
+		switch lc.simpleCmd {
+		case 'a':
+			e.Right()
+		case 'I':
+			e.Home()
+		case 'A':
+			e.End()
+		// 'i' - no movement needed
+		}
+		e.InsertString(lc.insertText)
+		return Event{Consumed: true, TextChanged: true}
+	}
+
+	return Event{Consumed: true}
+}
+
+// replayMotionChange replays an operator+motion change.
+func (s *VimScheme) replayMotionChange(e *Editor, lc lastChange, cnt int) Event {
+	// Define motion function
+	var motion func()
+	var motionType string
+
+	switch lc.motion {
+	case 'h':
+		motion = func() { e.Left() }
+		motionType = "exclusive"
+	case 'l':
+		motion = func() { e.Right() }
+		motionType = "exclusive"
+	case 'w':
+		motion = func() { e.WordRight() }
+		motionType = "exclusive"
+	case 'b':
+		motion = func() { e.WordLeft() }
+		motionType = "exclusive"
+	case 'e':
+		motion = func() { e.WordEnd() }
+		motionType = "inclusive"
+	case 'W':
+		motion = func() { e.BigWordRight() }
+		motionType = "exclusive"
+	case 'B':
+		motion = func() { e.BigWordLeft() }
+		motionType = "exclusive"
+	case 'E':
+		motion = func() { e.BigWordEnd() }
+		motionType = "inclusive"
+	case '0':
+		motion = func() { e.Home() }
+		motionType = "exclusive"
+		cnt = 1
+	case '$':
+		motion = func() { e.End() }
+		motionType = "inclusive"
+		cnt = 1
+	case '^':
+		motion = func() { e.Home() }
+		motionType = "exclusive"
+		cnt = 1
+	default:
+		return Event{Consumed: true}
+	}
+
+	startPos := e.Cursor()
+	for i := 0; i < cnt; i++ {
+		motion()
+	}
+	endPos := e.Cursor()
+
+	if motionType == "inclusive" && endPos < len(e.Text()) {
+		endPos++
+	}
+	if startPos > endPos {
+		startPos, endPos = endPos, startPos
+	}
+
+	text := e.Text()
+	switch lc.operator {
+	case OpDelete:
+		e.Set(text[:startPos] + text[endPos:])
+		e.SetCursor(startPos)
+	case OpChange:
+		e.Set(text[:startPos] + text[endPos:])
+		e.SetCursor(startPos)
+		e.InsertString(lc.insertText)
+	}
+
+	return Event{Consumed: true, TextChanged: true}
+}
+
+// replayTextObjChange replays an operator+text object change.
+func (s *VimScheme) replayTextObjChange(e *Editor, lc lastChange) Event {
+	text := e.Text()
+	cursor := e.Cursor()
+	var start, end int
+	found := false
+
+	switch lc.textObj {
+	case 'w', 'W':
+		start, end, found = findWordObject(text, cursor, lc.inner)
+	case '"':
+		start, end, found = findQuoteObject(text, cursor, '"', lc.inner)
+	case '\'':
+		start, end, found = findQuoteObject(text, cursor, '\'', lc.inner)
+	case 'q':
+		start, end, found = findAnyQuoteObject(text, cursor, lc.inner)
+	case 's':
+		start, end, found = findSentenceObject(text, cursor, lc.inner)
+	}
+
+	if !found {
+		return Event{Consumed: true}
+	}
+
+	switch lc.operator {
+	case OpDelete:
+		e.Set(text[:start] + text[end:])
+		e.SetCursor(start)
+	case OpChange:
+		e.Set(text[:start] + text[end:])
+		e.SetCursor(start)
+		e.InsertString(lc.insertText)
+	}
+
+	return Event{Consumed: true, TextChanged: true}
+}
+
+// replayFindChange replays an operator+find change.
+func (s *VimScheme) replayFindChange(e *Editor, lc lastChange, cnt int) Event {
+	text := e.Text()
+	cursor := e.Cursor()
+	targetPos := -1
+
+	switch lc.findType {
+	case FindForward, FindForwardBefore:
+		pos := cursor + 1
+		found := 0
+		for pos < len(text) {
+			if text[pos] == lc.findChar {
+				found++
+				if found == cnt {
+					targetPos = pos
+					break
+				}
+			}
+			pos++
+		}
+	case FindBackward, FindBackwardAfter:
+		pos := cursor - 1
+		found := 0
+		for pos >= 0 {
+			if text[pos] == lc.findChar {
+				found++
+				if found == cnt {
+					targetPos = pos
+					break
+				}
+			}
+			pos--
+		}
+	}
+
+	if targetPos == -1 {
+		return Event{Consumed: true}
+	}
+
+	startPos := cursor
+	endPos := targetPos
+
+	switch lc.findType {
+	case FindForward:
+		endPos = targetPos + 1
+	case FindForwardBefore:
+		endPos = targetPos
+	case FindBackward:
+		startPos = targetPos
+		endPos = cursor
+	case FindBackwardAfter:
+		startPos = targetPos + 1
+		endPos = cursor
+	}
+
+	if startPos > endPos {
+		startPos, endPos = endPos, startPos
+	}
+
+	switch lc.operator {
+	case OpDelete:
+		e.Set(text[:startPos] + text[endPos:])
+		e.SetCursor(startPos)
+	case OpChange:
+		e.Set(text[:startPos] + text[endPos:])
+		e.SetCursor(startPos)
+		e.InsertString(lc.insertText)
+	case OpNone:
+		// Just a motion, not repeated with .
+		return Event{Consumed: true}
+	}
+
+	return Event{Consumed: true, TextChanged: true}
 }
 
 // Name returns the scheme name.
@@ -80,6 +461,12 @@ func (s *VimScheme) handleInsertMode(e *Editor, buf []byte, n int) Event {
 	switch {
 	case n == 1 && buf[0] == 27: // Escape - return to normal mode
 		s.mode = VimNormal
+		// Finalize recording if we were recording insert text
+		if s.recording {
+			s.lastChange.insertText = s.insertBuffer
+			s.insertBuffer = ""
+			s.recording = false
+		}
 		// Move cursor back one (vim behavior on escape)
 		e.Left()
 		return Event{Consumed: true}
@@ -89,12 +476,20 @@ func (s *VimScheme) handleInsertMode(e *Editor, buf []byte, n int) Event {
 
 	case buf[0] == 127 || buf[0] == 8: // Backspace
 		if e.DeleteBackward() {
+			// Record backspace in insert buffer
+			if s.recording && len(s.insertBuffer) > 0 {
+				s.insertBuffer = s.insertBuffer[:len(s.insertBuffer)-1]
+			}
 			return Event{Consumed: true, TextChanged: true}
 		}
 		return Event{Consumed: true}
 
 	case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
 		e.Insert(buf[0])
+		// Record in insert buffer
+		if s.recording {
+			s.insertBuffer += string(buf[0])
+		}
 		return Event{Consumed: true, TextChanged: true}
 
 	// Ctrl keys that work in insert mode
@@ -117,6 +512,8 @@ func (s *VimScheme) resetState() {
 	s.countBuf = ""
 	s.textObjPending = false
 	s.textObjInner = false
+	s.replacePending = false
+	s.findPending = FindNone
 }
 
 // getCount returns the effective count (1 if no count specified).
@@ -199,6 +596,37 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 		return Event{Consumed: true}
 	}
 
+	// Handle find target character when we're waiting for it
+	if s.findPending != FindNone {
+		if ch >= 32 && ch < 127 { // Printable ASCII
+			return s.executeFindMotion(e, ch)
+		}
+		// Non-printable - cancel find
+		s.resetState()
+		return Event{Consumed: true}
+	}
+
+	// Handle replacement character when we're waiting for it
+	if s.replacePending {
+		if ch >= 32 && ch < 127 { // Printable ASCII
+			cnt := s.getCount()
+			s.recordReplaceChange(ch, cnt)
+			s.resetState()
+			e.SaveState()
+			// Replace cnt characters with the pressed character
+			for i := 0; i < cnt && e.Cursor() < e.Len(); i++ {
+				e.DeleteForward()
+				e.Insert(ch)
+			}
+			// Move cursor back one (vim behavior: stay on last replaced char)
+			e.Left()
+			return Event{Consumed: true, TextChanged: true}
+		}
+		// Non-printable - cancel replacement
+		s.resetState()
+		return Event{Consumed: true}
+	}
+
 	// Handle text objects when we're waiting for the object type
 	if s.textObjPending {
 		if ev, handled := s.handleTextObject(e, ch); handled {
@@ -226,23 +654,31 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 	if s.mode != VimOperatorPending {
 		switch ch {
 		case 'i': // Insert before cursor
+			cnt := s.getCount()
+			s.startInsertRecording('i', cnt)
 			s.resetState()
 			s.mode = VimInsert
 			return Event{Consumed: true}
 
 		case 'a': // Append after cursor
+			cnt := s.getCount()
+			s.startInsertRecording('a', cnt)
 			s.resetState()
 			e.Right()
 			s.mode = VimInsert
 			return Event{Consumed: true}
 
 		case 'I': // Insert at beginning
+			cnt := s.getCount()
+			s.startInsertRecording('I', cnt)
 			s.resetState()
 			e.Home()
 			s.mode = VimInsert
 			return Event{Consumed: true}
 
 		case 'A': // Append at end
+			cnt := s.getCount()
+			s.startInsertRecording('A', cnt)
 			s.resetState()
 			e.End()
 			s.mode = VimInsert
@@ -251,6 +687,7 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 		// Simple deletions (not motions)
 		case 'x': // Delete char at cursor
 			cnt := s.getCount()
+			s.recordSimpleChange('x', cnt)
 			s.resetState()
 			e.SaveState()
 			changed := false
@@ -263,6 +700,7 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 
 		case 'X': // Delete char before cursor
 			cnt := s.getCount()
+			s.recordSimpleChange('X', cnt)
 			s.resetState()
 			e.SaveState()
 			changed := false
@@ -274,12 +712,20 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 			return Event{Consumed: true, TextChanged: changed}
 
 		case 'D': // Delete to end of line
+			s.recordSimpleChange('D', 1)
 			s.resetState()
 			e.SaveState()
 			e.KillToEnd()
 			return Event{Consumed: true, TextChanged: true}
 
 		case 'C': // Change to end of line (delete + insert)
+			cnt := s.getCount()
+			s.lastChange = lastChange{
+				changeType: ChangeSimple,
+				count:      cnt,
+				simpleCmd:  'C',
+			}
+			s.startChangeRecording()
 			s.resetState()
 			e.SaveState()
 			e.KillToEnd()
@@ -287,6 +733,13 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 			return Event{Consumed: true, TextChanged: true}
 
 		case 'S': // Substitute line (clear + insert)
+			cnt := s.getCount()
+			s.lastChange = lastChange{
+				changeType: ChangeSimple,
+				count:      cnt,
+				simpleCmd:  'S',
+			}
+			s.startChangeRecording()
 			s.resetState()
 			e.SaveState()
 			e.Clear()
@@ -295,6 +748,12 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 
 		case 's': // Substitute char (delete + insert)
 			cnt := s.getCount()
+			s.lastChange = lastChange{
+				changeType: ChangeSimple,
+				count:      cnt,
+				simpleCmd:  's',
+			}
+			s.startChangeRecording()
 			s.resetState()
 			e.SaveState()
 			for i := 0; i < cnt; i++ {
@@ -309,7 +768,34 @@ func (s *VimScheme) handleNormalMode(e *Editor, buf []byte, n int) Event {
 				return Event{Consumed: true, TextChanged: true}
 			}
 			return Event{Consumed: true}
+
+		case '.': // Repeat last change
+			return s.repeatLastChange(e)
+
+		case 'r': // Replace character - wait for replacement
+			s.replacePending = true
+			return Event{Consumed: true}
+
 		}
+	}
+
+	// Find character motions - work in both normal and operator-pending modes
+	switch ch {
+	case 'f': // Find forward (inclusive)
+		s.findPending = FindForward
+		return Event{Consumed: true}
+
+	case 'F': // Find backward (inclusive)
+		s.findPending = FindBackward
+		return Event{Consumed: true}
+
+	case 't': // Find forward, stop before (exclusive)
+		s.findPending = FindForwardBefore
+		return Event{Consumed: true}
+
+	case 'T': // Find backward, stop after (exclusive)
+		s.findPending = FindBackwardAfter
+		return Event{Consumed: true}
 	}
 
 	// Ctrl+R for redo (works in normal mode, outside the operator-pending check)
@@ -357,6 +843,15 @@ func (s *VimScheme) handleMotion(e *Editor, ch byte) (Event, bool) {
 	case 'e': // Word end
 		motion = func() { e.WordEnd() }
 		motionType = "inclusive"
+	case 'W': // WORD forward (whitespace-separated)
+		motion = func() { e.BigWordRight() }
+		motionType = "exclusive"
+	case 'B': // WORD backward (whitespace-separated)
+		motion = func() { e.BigWordLeft() }
+		motionType = "exclusive"
+	case 'E': // WORD end (whitespace-separated)
+		motion = func() { e.BigWordEnd() }
+		motionType = "inclusive"
 	case '0': // Beginning of line
 		motion = func() { e.Home() }
 		motionType = "exclusive"
@@ -383,6 +878,13 @@ func (s *VimScheme) handleMotion(e *Editor, ch byte) (Event, bool) {
 	}
 
 	// Operator pending - execute operator over motion range
+	// Record the change for repeat (.)
+	op := s.operator
+	s.recordMotionChange(op, ch, cnt)
+	if op == OpChange {
+		s.startChangeRecording()
+	}
+
 	// Save state BEFORE moving cursor (so undo restores to original position)
 	e.SaveState()
 
@@ -505,6 +1007,13 @@ func (s *VimScheme) handleTextObject(e *Editor, ch byte) (Event, bool) {
 		return Event{Consumed: true}, true
 	}
 
+	// Record the change for repeat (.)
+	op := s.operator
+	s.recordTextObjChange(op, ch, s.textObjInner, s.getCount())
+	if op == OpChange {
+		s.startChangeRecording()
+	}
+
 	// Save state before executing operator
 	e.SaveState()
 
@@ -522,8 +1031,14 @@ func (s *VimScheme) handleTextObject(e *Editor, ch byte) (Event, bool) {
 	return ev, true
 }
 
+// charClassAt returns the character class for a byte in a string.
+func charClassAt(text string, i int) int {
+	return charClass(text[i])
+}
+
 // findWordObject finds the boundaries of a word text object.
 // inner=true: just the word, inner=false: word + surrounding space
+// Uses character classes: whitespace (0), word chars (1), punctuation (2)
 func findWordObject(text string, cursor int, inner bool) (start, end int, found bool) {
 	if len(text) == 0 {
 		return 0, 0, false
@@ -537,62 +1052,64 @@ func findWordObject(text string, cursor int, inner bool) (start, end int, found 
 		cursor = 0
 	}
 
-	// Check if cursor is on whitespace or word char
-	onSpace := text[cursor] == ' '
+	// Get the character class at cursor position
+	cursorClass := charClassAt(text, cursor)
 
-	if onSpace {
+	if cursorClass == 0 {
 		// Cursor on whitespace - select the whitespace region
 		start = cursor
 		end = cursor
 
 		// Expand left to find start of whitespace
-		for start > 0 && text[start-1] == ' ' {
+		for start > 0 && charClassAt(text, start-1) == 0 {
 			start--
 		}
 		// Expand right to find end of whitespace
-		for end < len(text) && text[end] == ' ' {
+		for end < len(text) && charClassAt(text, end) == 0 {
 			end++
 		}
 
 		if !inner {
-			// "a whitespace" - include adjacent word
-			// Prefer the word after, fall back to word before
+			// "a whitespace" - include adjacent word/punctuation
+			// Prefer the text after, fall back to text before
 			if end < len(text) {
-				// Include word after
-				for end < len(text) && text[end] != ' ' {
+				// Include next word/punctuation group
+				nextClass := charClassAt(text, end)
+				for end < len(text) && charClassAt(text, end) == nextClass {
 					end++
 				}
 			} else if start > 0 {
-				// Include word before
-				for start > 0 && text[start-1] != ' ' {
+				// Include previous word/punctuation group
+				prevClass := charClassAt(text, start-1)
+				for start > 0 && charClassAt(text, start-1) == prevClass {
 					start--
 				}
 			}
 		}
 	} else {
-		// Cursor on word char - find word boundaries
+		// Cursor on word char or punctuation - find boundaries of same class
 		start = cursor
 		end = cursor
 
-		// Expand left to find start of word
-		for start > 0 && text[start-1] != ' ' {
+		// Expand left to find start of this class
+		for start > 0 && charClassAt(text, start-1) == cursorClass {
 			start--
 		}
-		// Expand right to find end of word
-		for end < len(text) && text[end] != ' ' {
+		// Expand right to find end of this class
+		for end < len(text) && charClassAt(text, end) == cursorClass {
 			end++
 		}
 
 		if !inner {
-			// "a word" - include trailing space (or leading if at end)
-			if end < len(text) && text[end] == ' ' {
+			// "a word" - include trailing whitespace (or leading if at end)
+			if end < len(text) && charClassAt(text, end) == 0 {
 				// Include trailing whitespace
-				for end < len(text) && text[end] == ' ' {
+				for end < len(text) && charClassAt(text, end) == 0 {
 					end++
 				}
-			} else if start > 0 && text[start-1] == ' ' {
-				// No trailing space - include leading whitespace
-				for start > 0 && text[start-1] == ' ' {
+			} else if start > 0 && charClassAt(text, start-1) == 0 {
+				// No trailing whitespace - include leading whitespace
+				for start > 0 && charClassAt(text, start-1) == 0 {
 					start--
 				}
 			}
@@ -743,6 +1260,118 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// executeFindMotion executes a find character motion (f/F/t/T).
+// Works as a motion on its own or with a pending operator.
+func (s *VimScheme) executeFindMotion(e *Editor, target byte) Event {
+	findType := s.findPending
+	cnt := s.getCount()
+	hasOperator := s.mode == VimOperatorPending
+	text := e.Text()
+	cursor := e.Cursor()
+
+	// Find the target character
+	targetPos := -1
+
+	switch findType {
+	case FindForward, FindForwardBefore: // f, t - search forward
+		pos := cursor + 1
+		found := 0
+		for pos < len(text) {
+			if text[pos] == target {
+				found++
+				if found == cnt {
+					targetPos = pos
+					break
+				}
+			}
+			pos++
+		}
+
+	case FindBackward, FindBackwardAfter: // F, T - search backward
+		pos := cursor - 1
+		found := 0
+		for pos >= 0 {
+			if text[pos] == target {
+				found++
+				if found == cnt {
+					targetPos = pos
+					break
+				}
+			}
+			pos--
+		}
+	}
+
+	// Target not found - reset and do nothing
+	if targetPos == -1 {
+		s.resetState()
+		s.mode = VimNormal
+		return Event{Consumed: true}
+	}
+
+	// Adjust for t/T (stop before/after the target)
+	finalPos := targetPos
+	if findType == FindForwardBefore && targetPos > cursor {
+		finalPos = targetPos - 1
+	} else if findType == FindBackwardAfter && targetPos < cursor {
+		finalPos = targetPos + 1
+	}
+
+	// If no operator pending, just move the cursor
+	if !hasOperator {
+		s.resetState()
+		e.SetCursor(finalPos)
+		return Event{Consumed: true}
+	}
+
+	// Record the change for repeat (.)
+	op := s.operator
+	s.recordFindChange(op, findType, target, cnt)
+	if op == OpChange {
+		s.startChangeRecording()
+	}
+
+	// Operator pending - execute operator over the range
+	e.SaveState()
+
+	startPos := cursor
+	endPos := targetPos
+
+	// For forward motions, f is inclusive (include target), t is exclusive
+	// For backward motions, F is inclusive, T is exclusive
+	switch findType {
+	case FindForward: // f - inclusive forward
+		endPos = targetPos + 1
+	case FindForwardBefore: // t - exclusive forward (stop before target)
+		endPos = targetPos
+	case FindBackward: // F - inclusive backward
+		// endPos is targetPos, startPos is cursor
+		startPos = targetPos
+		endPos = cursor
+	case FindBackwardAfter: // T - exclusive backward (stop after target)
+		startPos = targetPos + 1
+		endPos = cursor
+	}
+
+	// Ensure start < end
+	if startPos > endPos {
+		startPos, endPos = endPos, startPos
+	}
+
+	// Execute the operator
+	ev, enterInsert := s.executeOperator(e, startPos, endPos)
+
+	// Reset state and set appropriate mode
+	s.resetState()
+	if enterInsert {
+		s.mode = VimInsert
+	} else {
+		s.mode = VimNormal
+	}
+
+	return ev
 }
 
 // findQuoteObject finds the boundaries of a quoted string text object.

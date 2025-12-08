@@ -1,6 +1,8 @@
 // Package lineedit provides a simple line editor with emacs-style keybindings.
 package lineedit
 
+import "strings"
+
 // editorState represents a snapshot of editor state for undo.
 type editorState struct {
 	text   []byte
@@ -161,6 +163,65 @@ func (e *Editor) AfterCursor() string {
 	return string(e.text[e.cursor:])
 }
 
+// CharAtCursor returns the character at the cursor position.
+// Returns empty string if cursor is at end of text.
+func (e *Editor) CharAtCursor() string {
+	if e.cursor >= len(e.text) {
+		return ""
+	}
+	return string(e.text[e.cursor])
+}
+
+// AfterCursorChar returns text after the cursor character (cursor+1 to end).
+// Use with CharAtCursor for vim-style block cursor rendering.
+func (e *Editor) AfterCursorChar() string {
+	if e.cursor >= len(e.text) {
+		return ""
+	}
+	return string(e.text[e.cursor+1:])
+}
+
+// RenderWithCursor returns HTML with cursor rendered using the specified tag.
+// tag should be "mark" for normal mode or "ins" for insert mode.
+func (e *Editor) RenderWithCursor(tag string, blockCursor bool) string {
+	escape := func(s string) string {
+		s = strings.ReplaceAll(s, "&", "&amp;")
+		s = strings.ReplaceAll(s, "<", "&lt;")
+		s = strings.ReplaceAll(s, ">", "&gt;")
+		return s
+	}
+
+	text := string(e.text)
+	cursor := e.cursor
+
+	var result string
+
+	if len(text) == 0 {
+		// Empty line - show underscore cursor (space isn't visible)
+		result = "<" + tag + ">_</" + tag + ">"
+	} else if blockCursor {
+		// Block cursor (vim normal mode) - cursor is ON a character
+		if cursor >= len(text) {
+			// Past end - show on last character
+			result = escape(text[:len(text)-1]) + "<" + tag + ">" + escape(string(text[len(text)-1])) + "</" + tag + ">"
+		} else {
+			// Normal case - cursor on current character
+			result = escape(text[:cursor]) + "<" + tag + ">" + escape(string(text[cursor])) + "</" + tag + ">" + escape(text[cursor+1:])
+		}
+	} else {
+		// Bar cursor (insert mode) - cursor is BETWEEN characters
+		if cursor >= len(text) {
+			// At end - show underscore cursor after text (space isn't visible)
+			result = escape(text) + "<" + tag + ">_</" + tag + ">"
+		} else {
+			// Cursor before a character - highlight that character
+			result = escape(text[:cursor]) + "<" + tag + ">" + escape(string(text[cursor])) + "</" + tag + ">" + escape(text[cursor+1:])
+		}
+	}
+
+	return result
+}
+
 // Insert adds a character at the cursor position.
 func (e *Editor) Insert(ch byte) {
 	e.text = append(e.text, 0)
@@ -227,8 +288,68 @@ func (e *Editor) End() {
 	e.cursor = len(e.text)
 }
 
-// wordBoundaryLeft finds the position of the previous word boundary.
+// isWordChar returns true if the byte is a "word" character (alphanumeric or underscore).
+// Used to distinguish between vim's w/b/e (word) and W/B/E (WORD) motions.
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// charClass returns the class of a character for word motion purposes.
+// 0 = whitespace, 1 = word char, 2 = punctuation/other
+func charClass(b byte) int {
+	if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+		return 0 // whitespace
+	}
+	if isWordChar(b) {
+		return 1 // word character
+	}
+	return 2 // punctuation/other
+}
+
+// wordBoundaryLeft finds the position of the previous word boundary (for 'b' motion).
 func (e *Editor) wordBoundaryLeft() int {
+	if e.cursor == 0 {
+		return 0
+	}
+	i := e.cursor - 1
+	// Skip whitespace
+	for i > 0 && charClass(e.text[i]) == 0 {
+		i--
+	}
+	if i == 0 {
+		return 0
+	}
+	// Get the class of current char
+	class := charClass(e.text[i])
+	// Skip chars of the same class
+	for i > 0 && charClass(e.text[i-1]) == class {
+		i--
+	}
+	return i
+}
+
+// wordBoundaryRight finds the position of the next word boundary (for 'w' motion).
+func (e *Editor) wordBoundaryRight() int {
+	if e.cursor >= len(e.text) {
+		return len(e.text)
+	}
+	i := e.cursor
+	// Get the class of current char
+	class := charClass(e.text[i])
+	// Skip chars of the same class
+	for i < len(e.text) && charClass(e.text[i]) == class {
+		i++
+	}
+	// Skip whitespace
+	for i < len(e.text) && charClass(e.text[i]) == 0 {
+		i++
+	}
+	return i
+}
+
+// bigWordBoundaryLeft finds the position of the previous WORD boundary (for 'B' motion).
+// WORDs are separated only by whitespace.
+func (e *Editor) bigWordBoundaryLeft() int {
 	if e.cursor == 0 {
 		return 0
 	}
@@ -237,20 +358,21 @@ func (e *Editor) wordBoundaryLeft() int {
 	for i > 0 && e.text[i] == ' ' {
 		i--
 	}
-	// Skip word chars
+	// Skip non-space chars
 	for i > 0 && e.text[i-1] != ' ' {
 		i--
 	}
 	return i
 }
 
-// wordBoundaryRight finds the position of the next word boundary.
-func (e *Editor) wordBoundaryRight() int {
+// bigWordBoundaryRight finds the position of the next WORD boundary (for 'W' motion).
+// WORDs are separated only by whitespace.
+func (e *Editor) bigWordBoundaryRight() int {
 	if e.cursor >= len(e.text) {
 		return len(e.text)
 	}
 	i := e.cursor
-	// Skip current word
+	// Skip current WORD (non-space chars)
 	for i < len(e.text) && e.text[i] != ' ' {
 		i++
 	}
@@ -261,14 +383,24 @@ func (e *Editor) wordBoundaryRight() int {
 	return i
 }
 
-// WordLeft moves cursor to the previous word boundary.
+// WordLeft moves cursor to the previous word boundary (vim 'b' motion).
 func (e *Editor) WordLeft() {
 	e.cursor = e.wordBoundaryLeft()
 }
 
-// WordRight moves cursor to the next word boundary.
+// WordRight moves cursor to the next word boundary (vim 'w' motion).
 func (e *Editor) WordRight() {
 	e.cursor = e.wordBoundaryRight()
+}
+
+// BigWordLeft moves cursor to the previous WORD boundary (vim 'B' motion).
+func (e *Editor) BigWordLeft() {
+	e.cursor = e.bigWordBoundaryLeft()
+}
+
+// BigWordRight moves cursor to the next WORD boundary (vim 'W' motion).
+func (e *Editor) BigWordRight() {
+	e.cursor = e.bigWordBoundaryRight()
 }
 
 // wordEndRight finds the position of the end of the current/next word (vim 'e' motion).
@@ -277,15 +409,44 @@ func (e *Editor) wordEndRight() int {
 		return len(e.text) - 1
 	}
 	i := e.cursor
-	// If on a word char, move at least one position
+	// Move at least one position if not on whitespace
+	if i < len(e.text) && charClass(e.text[i]) != 0 {
+		i++
+	}
+	// Skip whitespace
+	for i < len(e.text) && charClass(e.text[i]) == 0 {
+		i++
+	}
+	if i >= len(e.text) {
+		return len(e.text) - 1
+	}
+	// Get the class at current position
+	class := charClass(e.text[i])
+	// Move to end of this class
+	for i < len(e.text)-1 && charClass(e.text[i+1]) == class {
+		i++
+	}
+	if i < 0 {
+		return 0
+	}
+	return i
+}
+
+// bigWordEndRight finds the position of the end of the current/next WORD (vim 'E' motion).
+func (e *Editor) bigWordEndRight() int {
+	if e.cursor >= len(e.text)-1 {
+		return len(e.text) - 1
+	}
+	i := e.cursor
+	// Move at least one position if not on space
 	if i < len(e.text) && e.text[i] != ' ' {
 		i++
 	}
-	// Skip any spaces
+	// Skip spaces
 	for i < len(e.text) && e.text[i] == ' ' {
 		i++
 	}
-	// Move to end of word
+	// Move to end of WORD (non-space chars)
 	for i < len(e.text)-1 && e.text[i+1] != ' ' {
 		i++
 	}
@@ -301,6 +462,14 @@ func (e *Editor) WordEnd() {
 		return
 	}
 	e.cursor = e.wordEndRight()
+}
+
+// BigWordEnd moves cursor to the end of the current/next WORD (vim 'E' motion).
+func (e *Editor) BigWordEnd() {
+	if len(e.text) == 0 {
+		return
+	}
+	e.cursor = e.bigWordEndRight()
 }
 
 // DeleteWordBackward deletes from cursor to previous word boundary (Ctrl+W).

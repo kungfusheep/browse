@@ -457,20 +457,25 @@ func run(url string) error {
 			msgHTML.WriteString("\n<hr>\n")
 		}
 
-		// Build input with cursor at correct position
-		escapeHTML := func(s string) string {
-			s = strings.ReplaceAll(s, "&", "&amp;")
-			s = strings.ReplaceAll(s, "<", "&lt;")
-			s = strings.ReplaceAll(s, ">", "&gt;")
-			return s
+		// Check if we're in vim normal mode for block cursor rendering
+		vimNormalMode := false
+		if vim, ok := chatScheme.(*lineedit.VimScheme); ok && !vim.InInsertMode() {
+			vimNormalMode = true
 		}
-		beforeCursor := escapeHTML(editor.BeforeCursor())
-		afterCursor := escapeHTML(editor.AfterCursor())
+
+		// Use shared cursor rendering
+		var inputLine string
+		if vimNormalMode {
+			inputLine = editor.RenderWithCursor("mark", true)
+		} else {
+			inputLine = editor.RenderWithCursor("ins", false)
+		}
+
 		// Include padding lines below input to ensure it's visible when scrolled to bottom
-		inputPrompt := fmt.Sprintf(`<p><strong>&gt;</strong> %s█%s</p>
+		inputPrompt := fmt.Sprintf(`<p><strong>&gt;</strong> %s</p>
 <p>&nbsp;</p>
 <p>&nbsp;</p>
-<p>&nbsp;</p>`, beforeCursor, afterCursor)
+<p>&nbsp;</p>`, inputLine)
 
 		return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -1208,7 +1213,8 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			// Let the keybinding scheme handle the input
 			event := chatScheme.HandleKey(chatEditor, buf[:n], n)
 
-			if event.TextChanged {
+			// Update display for any consumed event (cursor moves, mode changes, text changes)
+			if event.Consumed {
 				updateChatDisplay()
 			}
 
@@ -2418,13 +2424,24 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			sandboxHTML := func() string {
 				schemeName := sandboxScheme.Name()
 				modeInfo := ""
+				vimNormalMode := false
 				if vim, ok := sandboxScheme.(*lineedit.VimScheme); ok {
 					if vim.InInsertMode() {
 						modeInfo = " (INSERT)"
 					} else {
 						modeInfo = " (NORMAL)"
+						vimNormalMode = true
 					}
 				}
+
+				// Use shared cursor rendering
+				var inputLine string
+				if vimNormalMode {
+					inputLine = sandboxEditor.RenderWithCursor("mark", true)
+				} else {
+					inputLine = sandboxEditor.RenderWithCursor("ins", false)
+				}
+
 				return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head><title>Editor Sandbox</title></head>
@@ -2438,7 +2455,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 <p>Press <strong>Escape</strong> to exit sandbox</p>
 <hr>
 <h3>Input</h3>
-<p><strong>&gt;</strong> %s█%s</p>
+<p><strong>&gt;</strong> %s</p>
 <p>&nbsp;</p>
 <hr>
 <h3>Keybindings</h3>
@@ -2447,9 +2464,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 <p><strong>Vim Insert:</strong> Type normally, Escape to return to normal mode</p>
 </article>
 </body>
-</html>`, schemeName, modeInfo,
-					strings.ReplaceAll(sandboxEditor.BeforeCursor(), "<", "&lt;"),
-					strings.ReplaceAll(sandboxEditor.AfterCursor(), "<", "&lt;"))
+</html>`, schemeName, modeInfo, inputLine)
 			}
 
 			// Navigate to sandbox
