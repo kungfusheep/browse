@@ -108,6 +108,7 @@ type Keybindings struct {
 	EditConfig         string `json:"editConfig"`
 	AISummary          string `json:"aiSummary"`
 	EditorSandbox      string `json:"editorSandbox"`
+	TranslatePage      string `json:"translatePage"` // translate page to English
 }
 
 // Config is the main configuration struct
@@ -191,6 +192,7 @@ func Default() *Config {
 			EditConfig:         "C",
 			AISummary:          "S",
 			EditorSandbox:      "~",
+			TranslatePage:      "X",
 		},
 	}
 }
@@ -351,6 +353,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.EditConfig, user.Keybindings.EditConfig)
 	mergeKeybinding(&result.Keybindings.AISummary, user.Keybindings.AISummary)
 	mergeKeybinding(&result.Keybindings.EditorSandbox, user.Keybindings.EditorSandbox)
+	mergeKeybinding(&result.Keybindings.TranslatePage, user.Keybindings.TranslatePage)
 
 	return &result
 }
@@ -462,6 +465,7 @@ keybindings = new {
   generateRules = "R"
   editConfig = "C"
   aiSummary = "S"
+  translatePage = "X"  // translate page to English
 }
 `
 }

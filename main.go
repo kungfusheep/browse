@@ -32,6 +32,7 @@ import (
 	"browse/session"
 	"browse/sites"
 	"browse/theme"
+	"browse/translate"
 
 	// Site-specific handlers register themselves via init()
 	_ "browse/hn"
@@ -437,6 +438,7 @@ func run(url string) error {
 			maxScroll = 0
 		}
 		scrollY = 0
+		focusModeActive = false // Reset focus mode on navigation
 	}
 
 	// Define openNewBuffer helper - opens a new buffer (like a new tab)
@@ -458,6 +460,7 @@ func run(url string) error {
 			maxScroll = 0
 		}
 		scrollY = 0
+		focusModeActive = false // Reset focus mode on buffer change
 	}
 
 	// generateDictHTML renders dictionary definitions as HTML
@@ -1160,7 +1163,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 
 			// Footer hint
-			hint := " label=select  z=toggle variant  ESC=cancel "
+			hint := " label=preview  z=toggle variant  ESC=close "
 			hintX := startX + (boxWidth-len(hint))/2
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
@@ -2231,7 +2234,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					if label == jumpInput && i < len(theme.All) {
 						matched = true
 						theme.Current = theme.All[i]
-						themePickerMode = false
+						// Stay open for easy theme trialling - ESC to close
 						jumpInput = ""
 						redraw()
 						break
@@ -2623,6 +2626,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				url = b.current.url
 				scrollY = b.current.scrollY
 				currentHTML = b.current.html
+				focusModeActive = false // Reset focus mode on buffer switch
 				contentHeight = renderer.ContentHeight(doc)
 				maxScroll = contentHeight - height
 				if maxScroll < 0 {
@@ -2713,6 +2717,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				url = buf.current.url
 				scrollY = buf.current.scrollY
 				currentHTML = buf.current.html
+				focusModeActive = false // Reset focus mode on navigation
 				contentHeight = renderer.ContentHeight(doc)
 				maxScroll = contentHeight - height
 				if maxScroll < 0 {
@@ -2973,6 +2978,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				url = buf.current.url
 				scrollY = buf.current.scrollY
 				currentHTML = buf.current.html
+				focusModeActive = false // Reset focus mode on navigation
 				if doc != nil {
 					contentHeight = renderer.ContentHeight(doc)
 					maxScroll = contentHeight - height
@@ -2995,6 +3001,61 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				newDoc, err := fetchBrowserWithSpinner(canvas, url)
 				if err == nil {
 					doc = newDoc
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					scrollY = 0
+				}
+				redraw()
+			}
+
+		case key(buf[0], kb.TranslatePage): // Translate page to English
+			if doc != nil && url != "browse://home" {
+				// Show translating message
+				canvas.DimAll()
+				msg := " Translating... "
+				msgX := (width - len(msg)) / 2
+				msgY := height / 2
+				canvas.WriteString(msgX, msgY, msg, render.Style{Reverse: true, Bold: true})
+				canvas.RenderToWithBase(os.Stdout, theme.Current.BaseStyle())
+
+				// Get source language from document or use auto-detect
+				sourceLang := doc.Lang
+				if sourceLang == "" || sourceLang == "en" {
+					sourceLang = "auto"
+				}
+
+				// Extract text for translation
+				text := doc.PlainTextForTranslation()
+				if text != "" {
+					client := translate.NewClient()
+					translated, err := client.Translate(text, sourceLang, "en")
+					if err != nil {
+						// Show error
+						errorHTML := fmt.Sprintf(`<!DOCTYPE html><html><head><title>Translation Error</title></head><body><article><h1>Translation Failed</h1><p>%s</p></article></body></html>`, err.Error())
+						errorDoc, _ := html.ParseString(errorHTML)
+						if errorDoc != nil {
+							doc = errorDoc
+							doc.URL = url
+						}
+					} else {
+						// Create translated document
+						title := doc.Title
+						if title != "" {
+							title = title + " (Translated)"
+						} else {
+							title = "Translated Page"
+						}
+						translatedHTML := fmt.Sprintf(`<!DOCTYPE html><html lang="en"><head><title>%s</title></head><body><article><h1>%s</h1>%s</article></body></html>`,
+							title, title, textToHTML(translated))
+						translatedDoc, _ := html.ParseString(translatedHTML)
+						if translatedDoc != nil {
+							doc = translatedDoc
+							doc.URL = url + " (translated)"
+						}
+					}
 					contentHeight = renderer.ContentHeight(doc)
 					maxScroll = contentHeight - height
 					if maxScroll < 0 {
@@ -3355,6 +3416,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				url = b.current.url
 				scrollY = b.current.scrollY
 				currentHTML = b.current.html
+				focusModeActive = false // Reset focus mode on buffer switch
 				contentHeight = renderer.ContentHeight(doc)
 				maxScroll = contentHeight - height
 				if maxScroll < 0 {
@@ -3914,6 +3976,28 @@ func copyToClipboard(text string) error {
 	return cmd.Run()
 }
 
+// textToHTML converts plain text with paragraph breaks to HTML paragraphs.
+func textToHTML(text string) string {
+	var sb strings.Builder
+	paragraphs := strings.Split(text, "\n\n")
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// Escape HTML entities
+		p = strings.ReplaceAll(p, "&", "&amp;")
+		p = strings.ReplaceAll(p, "<", "&lt;")
+		p = strings.ReplaceAll(p, ">", "&gt;")
+		// Convert single newlines to <br>
+		p = strings.ReplaceAll(p, "\n", "<br>")
+		sb.WriteString("<p>")
+		sb.WriteString(p)
+		sb.WriteString("</p>\n")
+	}
+	return sb.String()
+}
+
 // openInBrowser opens the URL in the default system browser.
 func openInBrowser(url string) error {
 	var cmd *exec.Cmd
@@ -3954,37 +4038,39 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <h1>Browse</h1>
 <p>A terminal-based web browser for reading the web in beautiful monospace.</p>
 
-<h2>Navigation</h2>
-<p>
-<strong>j/k</strong> - scroll down/up |
-<strong>d/u</strong> - half page down/up |
-<strong>g/G</strong> - top/bottom |
-<strong>[/]</strong> - prev/next paragraph |
-<strong>{/}</strong> - prev/next section |
-<strong>o</strong> - open URL |
-<strong>/</strong> - web search |
-<strong>y</strong> - copy URL |
-<strong>go</strong> - open in browser |
-<strong>E</strong> - edit in $EDITOR |
-<strong>f</strong> - follow link |
-<strong>t</strong> - table of contents |
-<strong>n</strong> - site navigation |
-<strong>l</strong> - link index |
-<strong>b/B</strong> - back/forward |
-<strong>T</strong> - new buffer |
-<strong>gt/gT</strong> - next/prev buffer |
-<strong>&#96;</strong> - buffer list |
-<strong>M</strong> - add favourite |
-<strong>'</strong> - favourites list |
-<strong>H</strong> - home |
-<strong>s</strong> - structure inspector |
-<strong>w</strong> - wide mode |
-<strong>i</strong> - input field |
-<strong>r</strong> - reload with JS |
-<strong>R</strong> - generate AI rules |
-<strong>C</strong> - edit config |
-<strong>q</strong> - quit
-</p>
+<h2>Keybindings</h2>
+<table>
+<tr><th>Key</th><th>Action</th></tr>
+<tr><td><strong>j/k</strong></td><td>Scroll down/up</td></tr>
+<tr><td><strong>d/u</strong></td><td>Half page down/up</td></tr>
+<tr><td><strong>gg/G</strong></td><td>Go to top/bottom</td></tr>
+<tr><td><strong>[/]</strong></td><td>Prev/next paragraph (focus mode)</td></tr>
+<tr><td><strong>{/}</strong></td><td>Prev/next section</td></tr>
+<tr><td><strong>o</strong></td><td>Open URL</td></tr>
+<tr><td><strong>/</strong></td><td>Web search</td></tr>
+<tr><td><strong>y</strong></td><td>Copy URL to clipboard</td></tr>
+<tr><td><strong>f</strong></td><td>Follow link</td></tr>
+<tr><td><strong>go</strong></td><td>Open in default browser</td></tr>
+<tr><td><strong>E</strong></td><td>Edit page in $EDITOR</td></tr>
+<tr><td><strong>t</strong></td><td>Table of contents</td></tr>
+<tr><td><strong>n</strong></td><td>Site navigation</td></tr>
+<tr><td><strong>l</strong></td><td>Link index</td></tr>
+<tr><td><strong>s</strong></td><td>Structure inspector</td></tr>
+<tr><td><strong>b/B</strong></td><td>Back/forward in history</td></tr>
+<tr><td><strong>T</strong></td><td>New buffer</td></tr>
+<tr><td><strong>gt/gT</strong></td><td>Next/prev buffer</td></tr>
+<tr><td><strong>&#96;</strong></td><td>Buffer list</td></tr>
+<tr><td><strong>M</strong></td><td>Add to favourites</td></tr>
+<tr><td><strong>'</strong></td><td>Favourites list</td></tr>
+<tr><td><strong>H</strong></td><td>Home</td></tr>
+<tr><td><strong>w</strong></td><td>Toggle wide mode</td></tr>
+<tr><td><strong>i</strong></td><td>Focus input field</td></tr>
+<tr><td><strong>r</strong></td><td>Reload with JavaScript</td></tr>
+<tr><td><strong>R</strong></td><td>Generate AI rules</td></tr>
+<tr><td><strong>C</strong></td><td>Edit config</td></tr>
+<tr><td><strong>X</strong></td><td>Translate page to English</td></tr>
+<tr><td><strong>q</strong></td><td>Quit</td></tr>
+</table>
 ` + favouritesSection + `
 <h2>News</h2>
 <ul>

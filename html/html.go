@@ -47,6 +47,9 @@ func tablesEnabled() bool {
 
 // Document represents a parsed HTML document with separate content and navigation.
 type Document struct {
+	Title      string  // Page title (from <title> tag)
+	URL        string  // Source URL of the document
+	Lang       string  // Document language (from <html lang="...">)
 	Content    *Node   // Main article content
 	Navigation []*Node // Navigation elements (nav, header, footer links)
 }
@@ -68,6 +71,9 @@ type Node struct {
 
 	// Table cell properties
 	IsHeader bool // true for th cells
+
+	// Layout hints
+	Prefix string // prefix to add to every line (e.g., "│ " for threaded comments)
 }
 
 // NodeType identifies the kind of content node.
@@ -97,6 +103,7 @@ const (
 	NodeTableRow   // A table row
 	NodeTableCell  // A table cell (th or td)
 	NodeAnchor     // An anchor point (ID only, no content)
+	NodeHR         // Horizontal rule/separator
 )
 
 // Parse extracts article content from HTML, returning a Document with
@@ -109,6 +116,26 @@ func Parse(r io.Reader) (*Document, error) {
 
 	result := &Document{
 		Content: &Node{Type: NodeDocument},
+	}
+
+	// Extract language from <html lang="...">
+	if htmlElem := findElement(doc, "html"); htmlElem != nil {
+		for _, a := range htmlElem.Attr {
+			if a.Key == "lang" && a.Val != "" {
+				// Normalize to just the language code (e.g., "en-US" -> "en")
+				lang := a.Val
+				if idx := strings.Index(lang, "-"); idx > 0 {
+					lang = lang[:idx]
+				}
+				result.Lang = strings.ToLower(lang)
+				break
+			}
+		}
+	}
+
+	// Extract title from <title> tag
+	if title := findElement(doc, "title"); title != nil {
+		result.Title = extractText(title)
 	}
 
 	// Find the body element to extract navigation from the whole page
@@ -266,6 +293,18 @@ func findElement(n *html.Node, tag string) *html.Node {
 		}
 	}
 	return nil
+}
+
+// extractText recursively extracts all text content from a node.
+func extractText(n *html.Node) string {
+	if n.Type == html.TextNode {
+		return n.Data
+	}
+	var result strings.Builder
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		result.WriteString(extractText(c))
+	}
+	return strings.TrimSpace(whitespaceRe.ReplaceAllString(result.String(), " "))
 }
 
 // extractNavigation walks the tree and extracts all navigation elements.
@@ -1172,5 +1211,37 @@ func (n *Node) appendPlainText(sb *strings.Builder) {
 	}
 	for _, child := range n.Children {
 		child.appendPlainText(sb)
+	}
+}
+
+// PlainTextForTranslation returns the document text with paragraph structure preserved.
+// This is better for translation APIs which work best with natural paragraph breaks.
+func (d *Document) PlainTextForTranslation() string {
+	if d.Content == nil {
+		return ""
+	}
+	var sb strings.Builder
+	d.Content.appendStructuredText(&sb, false)
+	return strings.TrimSpace(sb.String())
+}
+
+// appendStructuredText appends text with paragraph breaks preserved.
+func (n *Node) appendStructuredText(sb *strings.Builder, inBlock bool) {
+	// Add paragraph breaks for block-level elements
+	isBlock := n.Type == NodeParagraph ||
+		n.Type == NodeHeading1 || n.Type == NodeHeading2 || n.Type == NodeHeading3 ||
+		n.Type == NodeBlockquote || n.Type == NodeListItem ||
+		n.Type == NodeCodeBlock
+
+	if isBlock && sb.Len() > 0 {
+		sb.WriteString("\n\n")
+	}
+
+	if n.Text != "" {
+		sb.WriteString(n.Text)
+	}
+
+	for _, child := range n.Children {
+		child.appendStructuredText(sb, isBlock)
 	}
 }
