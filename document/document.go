@@ -77,7 +77,12 @@ func FindMatches(doc *html.Document, query string, contentWidth int) []Match {
 
 	queryLower := strings.ToLower(query)
 	var matches []Match
-	y := 0
+
+	// Account for header height (top padding + title line + blank line, or just top padding)
+	y := 1 // default padding
+	if doc.Title != "" {
+		y = 3 // top padding + header line + blank line
+	}
 
 	// Count occurrences in a string
 	countIn := func(text string) int {
@@ -175,7 +180,11 @@ func FindAnchorY(doc *html.Document, id string, contentWidth int) (int, bool) {
 		return 0, false
 	}
 
-	y := 0
+	// Account for header height (top padding + title line + blank line, or just top padding)
+	y := 1 // default padding
+	if doc.Title != "" {
+		y = 3 // top padding + header line + blank line
+	}
 
 	for _, node := range doc.Content.Children {
 		// Check if this node has the target ID
@@ -257,6 +266,11 @@ type Renderer struct {
 	findQuery        string // lowercase query to highlight
 	findCurrentIdx   int    // global index of current match (-1 if none)
 	findMatchCounter int    // counts matches during render for highlighting
+
+	// Focus mode - dims non-focused content for easier reading
+	focusModeActive bool // whether focus mode is active
+	focusStartY     int  // absolute Y start of focused paragraph
+	focusEndY       int  // absolute Y end of focused paragraph
 }
 
 // NewRenderer creates a renderer for the given canvas with default 80-char margins.
@@ -293,6 +307,40 @@ func (r *Renderer) SetFindQuery(query string, currentIdx int) {
 	r.findCurrentIdx = currentIdx
 }
 
+// SetFocusMode enables or disables focus mode.
+// When active, ApplyFocusDimming will dim everything outside the focused Y range.
+// startY and endY are absolute document positions (not screen positions).
+func (r *Renderer) SetFocusMode(active bool, startY, endY int) {
+	r.focusModeActive = active
+	r.focusStartY = startY
+	r.focusEndY = endY
+}
+
+// ApplyFocusDimming dims all content outside the focused paragraph range.
+// Call this after Render() to apply the dimming effect.
+func (r *Renderer) ApplyFocusDimming() {
+	if !r.focusModeActive {
+		return
+	}
+
+	// Convert absolute Y positions to screen positions
+	screenStartY := r.focusStartY - r.scrollY
+	screenEndY := r.focusEndY - r.scrollY
+
+	// Dim all rows outside the focused range
+	for y := 0; y < r.canvas.Height(); y++ {
+		if y < screenStartY || y >= screenEndY {
+			// This row is outside the focused paragraph - dim it
+			for x := 0; x < r.canvas.Width(); x++ {
+				cell := r.canvas.Get(x, y)
+				cell.Style.Dim = true
+				cell.Style.Bold = false
+				r.canvas.Set(x, y, cell.Rune, cell.Style)
+			}
+		}
+	}
+}
+
 // Render draws the document to the canvas starting at the given y offset.
 func (r *Renderer) Render(doc *html.Document, scrollY int) {
 	r.canvas.Clear()
@@ -314,6 +362,9 @@ func (r *Renderer) Render(doc *html.Document, scrollY int) {
 
 	// Reset find match counter for highlighting
 	r.findMatchCounter = 0
+
+	// Render page header with title
+	r.renderHeader(doc.Title)
 
 	for _, child := range doc.Content.Children {
 		r.renderNode(child)
@@ -348,6 +399,13 @@ func (r *Renderer) ContentWidth() int {
 // ContentHeight returns the total height needed for the document.
 func (r *Renderer) ContentHeight(doc *html.Document) int {
 	height := 0
+
+	// Account for header (top padding + title line + blank line, or just top padding)
+	if doc.Title != "" {
+		height += 3
+	} else {
+		height += 1
+	}
 
 	for _, child := range doc.Content.Children {
 		height += r.nodeHeight(child, r.contentWidth)
@@ -388,6 +446,8 @@ func (r *Renderer) nodeHeight(n *html.Node, textWidth int) int {
 	case html.NodeTable:
 		// Table height = header separator + rows + top/bottom borders + spacing
 		return len(n.Children) + 3
+	case html.NodeHR:
+		return 2 // rule + blank
 	default:
 		return 1
 	}
@@ -423,6 +483,8 @@ func (r *Renderer) renderNode(n *html.Node) {
 		r.renderInput(n)
 	case html.NodeTable:
 		r.renderTable(n)
+	case html.NodeHR:
+		r.renderHR()
 	}
 }
 
@@ -586,12 +648,23 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 	// Extract text spans with link info
 	spans := r.extractSpans(n)
 
+	// Calculate available width accounting for prefix
+	prefixWidth := render.StringWidth(n.Prefix)
+	availableWidth := r.contentWidth - prefixWidth
+
 	// Wrap into lines
-	lines := r.wrapSpans(spans, r.contentWidth)
+	lines := r.wrapSpans(spans, availableWidth)
 
 	// Render each line
 	for _, line := range lines {
 		x := r.leftMargin
+
+		// Render prefix on every line (e.g., "│ │ " for nested comments)
+		if n.Prefix != "" {
+			r.canvas.WriteString(x, r.y, n.Prefix, render.Style{Dim: true})
+			x += prefixWidth
+		}
+
 		var currentLink *Link // Track current link being built
 
 		for _, span := range line {
@@ -768,6 +841,26 @@ func (r *Renderer) wrapSpans(spans []textSpan, width int) [][]textSpan {
 }
 
 func (r *Renderer) renderBlockquote(n *html.Node) {
+	// Check if children have custom prefixes (e.g., HN comment threads)
+	hasCustomPrefix := false
+	for _, child := range n.Children {
+		if child.Type == html.NodeParagraph && child.Prefix != "" {
+			hasCustomPrefix = true
+			break
+		}
+	}
+
+	if hasCustomPrefix {
+		// Use renderParagraph which respects the Prefix field
+		for _, child := range n.Children {
+			if child.Type == html.NodeParagraph {
+				r.renderParagraph(child)
+			}
+		}
+		return
+	}
+
+	// Default blockquote rendering with single bar
 	startY := r.y
 
 	for _, child := range n.Children {
@@ -992,6 +1085,56 @@ func (r *Renderer) renderTable(n *html.Node) {
 	r.drawTableBorder(tableX, colWidths, '└', '┴', '┘')
 	r.y++
 	r.y++ // Extra spacing after table
+}
+
+func (r *Renderer) renderHR() {
+	r.y++
+	r.canvas.DrawHLine(r.leftMargin, r.y, r.contentWidth, render.SingleBox.Horizontal, render.Style{Dim: true})
+	r.y++
+}
+
+// renderHeader draws an IBM-style page header with the title.
+// Format: ══╡ Page Title ╞════════════════════════════════
+func (r *Renderer) renderHeader(title string) {
+	r.y++ // Top padding
+
+	if title == "" {
+		return
+	}
+
+	// Truncate title if too long (leave room for decoration)
+	maxTitleLen := r.contentWidth - 10 // space for ══╡ and ╞══...
+	if len(title) > maxTitleLen {
+		title = title[:maxTitleLen-3] + "..."
+	}
+
+	// Build the header line: ══╡ Title ╞══════════════
+	leftDeco := "══╡ "
+	rightDeco := " ╞"
+
+	// Calculate remaining width for trailing decoration
+	usedWidth := render.StringWidth(leftDeco) + render.StringWidth(title) + render.StringWidth(rightDeco)
+	remainingWidth := r.contentWidth - usedWidth
+
+	// Build trailing ═══ fill
+	trailing := strings.Repeat("═", remainingWidth)
+
+	// Render the header
+	x := r.leftMargin
+	style := render.Style{Dim: true}
+
+	r.canvas.WriteString(x, r.y, leftDeco, style)
+	x += render.StringWidth(leftDeco)
+
+	r.canvas.WriteString(x, r.y, title, render.Style{}) // Title not dimmed
+	x += render.StringWidth(title)
+
+	r.canvas.WriteString(x, r.y, rightDeco, style)
+	x += render.StringWidth(rightDeco)
+
+	r.canvas.WriteString(x, r.y, trailing, style)
+
+	r.y += 2 // Header line + blank line
 }
 
 func (r *Renderer) calculateColumnWidths(table *html.Node) []int {

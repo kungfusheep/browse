@@ -18,6 +18,7 @@ var defaultSchema string
 // Display settings
 type Display struct {
 	WideMode             bool `json:"wideMode"`
+	FocusMode            bool `json:"focusMode"` // Dim non-focused paragraphs when using paragraph navigation
 	ShowScrollPercentage bool `json:"showScrollPercentage"`
 	ShowUrl              bool `json:"showUrl"`
 }
@@ -125,6 +126,7 @@ func Default() *Config {
 	return &Config{
 		Display: Display{
 			WideMode:             false,
+			FocusMode:            true,
 			ShowScrollPercentage: true,
 			ShowUrl:              true,
 		},
@@ -370,6 +372,9 @@ func DefaultPkl() string {
 display = new {
   // Start in wide mode (full terminal width)
   wideMode = false
+
+  // Focus mode: dim non-focused paragraphs when using paragraph navigation
+  focusMode = true
 
   // Show scroll percentage in status bar
   showScrollPercentage = true

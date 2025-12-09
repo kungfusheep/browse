@@ -11,6 +11,9 @@ class Display {
   /// Start in wide mode (full terminal width)
   wideMode: Boolean = false
 
+  /// Focus mode: dim non-focused paragraphs when using paragraph navigation
+  focusMode: Boolean = true
+
   /// Show scroll percentage in status bar
   showScrollPercentage: Boolean = true
 

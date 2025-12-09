@@ -30,7 +30,11 @@ import (
 	"browse/rules"
 	"browse/search"
 	"browse/session"
+	"browse/sites"
 	"browse/theme"
+
+	// Site-specific handlers register themselves via init()
+	_ "browse/hn"
 )
 
 func main() {
@@ -374,6 +378,11 @@ func run(url string) error {
 	defineWordPositions := map[string][]render.Word{} // word text -> all its positions
 	gPending := false // waiting for second key after 'g'
 
+	// Focus mode state - dims non-focused paragraphs for easier reading
+	focusModeActive := false     // is focus mode currently active?
+	focusParagraphStart := 0     // Y start of focused paragraph
+	focusParagraphEnd := 0       // Y end of focused paragraph (start of next, or content end)
+
 	// Key matching helpers for configurable bindings
 	key := func(input byte, binding string) bool {
 		return config.MatchSingle(input, binding)
@@ -673,7 +682,11 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 		// Set find highlighting and render
 		renderer.SetFindQuery(findInput, findCurrentIdx)
+		renderer.SetFocusMode(focusModeActive, focusParagraphStart, focusParagraphEnd)
 		renderer.Render(doc, scrollY)
+
+		// Apply focus mode dimming if active
+		renderer.ApplyFocusDimming()
 
 		// Draw subtle status bar at bottom with current domain
 		domain := getDomain(url)
@@ -3273,6 +3286,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			redraw()
 
 		case key(buf[0], kb.ScrollDown), buf[0] == 14: // j or Ctrl+N
+			focusModeActive = false
 			scrollY++
 			if scrollY > maxScroll {
 				scrollY = maxScroll
@@ -3280,6 +3294,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			redraw()
 
 		case key(buf[0], kb.ScrollUp), buf[0] == 16: // k or Ctrl+P
+			focusModeActive = false
 			scrollY--
 			if scrollY < 0 {
 				scrollY = 0
@@ -3287,6 +3302,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			redraw()
 
 		case key(buf[0], kb.HalfPageDown), buf[0] == 4: // d or Ctrl+D
+			focusModeActive = false
 			scrollY += height / 2
 			if scrollY > maxScroll {
 				scrollY = maxScroll
@@ -3294,6 +3310,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			redraw()
 
 		case key(buf[0], kb.HalfPageUp), buf[0] == 21: // u or Ctrl+U
+			focusModeActive = false
 			scrollY -= height / 2
 			if scrollY < 0 {
 				scrollY = 0
@@ -3301,6 +3318,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			redraw()
 
 		case keyG(buf[0], kb.GoTop): // gg - go to top
+			focusModeActive = false
 			gPending = false
 			scrollY = 0
 			redraw()
@@ -3347,16 +3365,43 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 		case key(buf[0], kb.GoBottom):
 			gPending = false
+			focusModeActive = false
 			scrollY = maxScroll
 			redraw()
 
 		case key(buf[0], kb.PrevParagraph): // Previous paragraph
 			paragraphs := renderer.Paragraphs()
+			// When focus mode is active, find paragraph before the focused one
+			searchFrom := scrollY
+			if focusModeActive {
+				searchFrom = focusParagraphStart
+			}
 			for i := len(paragraphs) - 1; i >= 0; i-- {
-				if paragraphs[i] < scrollY {
-					scrollY = paragraphs[i]
+				if paragraphs[i] < searchFrom {
+					// Calculate paragraph range
+					paraStart := paragraphs[i]
+					paraEnd := contentHeight
+					if i+1 < len(paragraphs) {
+						paraEnd = paragraphs[i+1]
+					}
+					paraHeight := paraEnd - paraStart
+
+					// Center the paragraph vertically if focus mode enabled
+					if cfg.Display.FocusMode {
+						focusModeActive = true
+						focusParagraphStart = paraStart
+						focusParagraphEnd = paraEnd
+						// Center: scroll so paragraph middle is at screen middle
+						scrollY = paraStart - (height-paraHeight)/2
+					} else {
+						scrollY = paraStart
+					}
+
 					if scrollY < 0 {
 						scrollY = 0
+					}
+					if scrollY > maxScroll {
+						scrollY = maxScroll
 					}
 					break
 				}
@@ -3365,9 +3410,35 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 		case key(buf[0], kb.NextParagraph): // Next paragraph
 			paragraphs := renderer.Paragraphs()
-			for _, p := range paragraphs {
-				if p > scrollY {
-					scrollY = p
+			// When focus mode is active, find paragraph after the focused one
+			searchFrom := scrollY
+			if focusModeActive {
+				searchFrom = focusParagraphStart
+			}
+			for i, p := range paragraphs {
+				if p > searchFrom {
+					// Calculate paragraph range
+					paraStart := p
+					paraEnd := contentHeight
+					if i+1 < len(paragraphs) {
+						paraEnd = paragraphs[i+1]
+					}
+					paraHeight := paraEnd - paraStart
+
+					// Center the paragraph vertically if focus mode enabled
+					if cfg.Display.FocusMode {
+						focusModeActive = true
+						focusParagraphStart = paraStart
+						focusParagraphEnd = paraEnd
+						// Center: scroll so paragraph middle is at screen middle
+						scrollY = paraStart - (height-paraHeight)/2
+					} else {
+						scrollY = paraStart
+					}
+
+					if scrollY < 0 {
+						scrollY = 0
+					}
 					if scrollY > maxScroll {
 						scrollY = maxScroll
 					}
@@ -3449,8 +3520,21 @@ func fetchAndParse(url string) (*html.Document, error) {
 	}
 	defer resp.Body.Close()
 
-	doc, err := html.Parse(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	done <- true
+	if err != nil {
+		return nil, fmt.Errorf("reading body: %w", err)
+	}
+
+	htmlContent := string(body)
+
+	// Check for site-specific handlers (HN, etc.)
+	if doc, _ := sites.ParseForURL(url, htmlContent); doc != nil {
+		return doc, nil
+	}
+
+	// Default HTML parser
+	doc, err := html.ParseString(htmlContent)
 	if err != nil {
 		return nil, fmt.Errorf("parsing HTML: %w", err)
 	}
@@ -3458,17 +3542,23 @@ func fetchAndParse(url string) (*html.Document, error) {
 	return doc, nil
 }
 
-func fetchWithBrowser(url string) (*html.Document, error) {
+func fetchWithBrowser(targetURL string) (*html.Document, error) {
 	// Start spinner in background (different animation for browser mode)
 	done := make(chan bool)
 	go showBrowserSpinner(done)
 
-	result, err := fetcher.WithBrowser(url)
+	result, err := fetcher.WithBrowser(targetURL)
 	done <- true
 	if err != nil {
 		return nil, err
 	}
 
+	// Check for site-specific handlers (HN, etc.)
+	if doc, _ := sites.ParseForURL(targetURL, result.HTML); doc != nil {
+		return doc, nil
+	}
+
+	// Default HTML parser
 	doc, err := html.ParseString(result.HTML)
 	if err != nil {
 		return nil, fmt.Errorf("parsing HTML: %w", err)
@@ -3478,8 +3568,8 @@ func fetchWithBrowser(url string) (*html.Document, error) {
 }
 
 // fetchAndParseQuiet fetches without spinner (for use when already in alt screen)
-func fetchAndParseQuiet(url string) (*html.Document, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func fetchAndParseQuiet(targetURL string) (*html.Document, error) {
+	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -3488,11 +3578,24 @@ func fetchAndParseQuiet(url string) (*html.Document, error) {
 	client := &http.Client{Timeout: fetcher.Timeout()}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching %s: %w", url, err)
+		return nil, fmt.Errorf("fetching %s: %w", targetURL, err)
 	}
 	defer resp.Body.Close()
 
-	doc, err := html.Parse(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading body: %w", err)
+	}
+
+	htmlContent := string(body)
+
+	// Check for site-specific handlers (HN, etc.)
+	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
+		return doc, nil
+	}
+
+	// Default HTML parser
+	doc, err := html.ParseString(htmlContent)
 	if err != nil {
 		return nil, fmt.Errorf("parsing HTML: %w", err)
 	}
@@ -3603,7 +3706,12 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 
 	htmlContent := string(body)
 
-	// Always parse with default parser first
+	// Check for site-specific handlers (HN, etc.) - they register via init()
+	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
+		return doc, htmlContent, nil
+	}
+
+	// Default HTML parser
 	defaultDoc, err := html.ParseString(htmlContent)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing HTML: %w", err)
