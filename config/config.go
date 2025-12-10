@@ -84,6 +84,7 @@ type Keybindings struct {
 	// History & Buffers
 	Back       string `json:"back"`
 	Forward    string `json:"forward"`
+	Refresh    string `json:"refresh"` // reload current page
 	NewBuffer  string `json:"newBuffer"`
 	NextBuffer string `json:"nextBuffer"`
 	PrevBuffer string `json:"prevBuffer"`
@@ -174,6 +175,7 @@ func Default() *Config {
 			LinkIndex:          "l",
 			Back:               "\x0f", // Ctrl-o (vim jump list style)
 			Forward:            "\t",   // Ctrl-i / Tab (vim jump list style)
+			Refresh:            "gr",   // reload current page
 			NewBuffer:          "T",
 			NextBuffer:         "gt",
 			PrevBuffer:         "gT",
@@ -335,6 +337,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.LinkIndex, user.Keybindings.LinkIndex)
 	mergeKeybinding(&result.Keybindings.Back, user.Keybindings.Back)
 	mergeKeybinding(&result.Keybindings.Forward, user.Keybindings.Forward)
+	mergeKeybinding(&result.Keybindings.Refresh, user.Keybindings.Refresh)
 	mergeKeybinding(&result.Keybindings.NewBuffer, user.Keybindings.NewBuffer)
 	mergeKeybinding(&result.Keybindings.NextBuffer, user.Keybindings.NextBuffer)
 	mergeKeybinding(&result.Keybindings.PrevBuffer, user.Keybindings.PrevBuffer)

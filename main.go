@@ -2649,6 +2649,34 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				redraw()
 			}
 
+		case keyG(buf[0], kb.Refresh): // gr - refresh current page
+			gPending = false
+			if url != "" && url != "browse://home" && !strings.HasPrefix(url, "dict://") {
+				go func(targetURL string) {
+					loading = true
+					redraw()
+					newDoc, err := fetchAndParseQuiet(targetURL)
+					loading = false
+					if err != nil {
+						redraw() // Just redraw, user can try again
+						return
+					}
+					// Update current buffer with refreshed content
+					doc = newDoc
+					buffers[currentBufferIdx].current.doc = newDoc
+					focusModeActive = false
+					contentHeight = renderer.ContentHeight(doc)
+					maxScroll = contentHeight - height
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					if scrollY > maxScroll {
+						scrollY = maxScroll
+					}
+					redraw()
+				}(url)
+			}
+
 		case key(buf[0], kb.TableOfContents): // t - table of contents
 			if !gPending && len(renderer.Headings()) > 0 {
 				tocMode = true
