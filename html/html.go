@@ -163,10 +163,24 @@ func Parse(r io.Reader) (*Document, error) {
 
 // findContentRoot finds the best element to extract content from.
 func findContentRoot(doc, body *html.Node) *html.Node {
-	// Strategy 1: Semantic elements (main first, then article)
-	// Check <main> before <article> because index pages often have multiple
-	// <article> elements inside <main>, and we want the full container
+	// Strategy 1: Semantic elements
+	// If we find <main>, check if it contains a single content-rich <article>
+	// (like GitHub READMEs). If so, prefer the article. If main contains
+	// multiple articles (like NYTimes index), keep the main.
 	if main := findElement(doc, "main"); main != nil {
+		// Look for article with content-indicator classes inside main
+		if article := findContentArticle(main); article != nil {
+			return article
+		}
+		// Check if main has multiple direct/nested articles (index page pattern)
+		articleCount := countArticles(main)
+		if articleCount >= 2 {
+			return main // Index page - keep the container
+		}
+		// Single or no articles - check if there's any article with real content
+		if article := findElement(main, "article"); article != nil {
+			return article
+		}
 		return main
 	}
 	if article := findElement(doc, "article"); article != nil {
@@ -194,6 +208,50 @@ func findContentRoot(doc, body *html.Node) *html.Node {
 	}
 
 	return body
+}
+
+// findContentArticle finds an article element with classes indicating it's main content
+// (e.g., "markdown-body", "entry-content", "post-content", "article-body").
+func findContentArticle(n *html.Node) *html.Node {
+	if n.Type == html.ElementNode && n.Data == "article" {
+		class := getAttr(n, "class")
+		// Content-indicator classes used by various sites
+		contentClasses := []string{
+			"markdown-body",  // GitHub
+			"entry-content",  // WordPress, GitHub
+			"post-content",   // Blogs
+			"article-body",   // News sites
+			"article-content",
+			"content-body",
+		}
+		for _, c := range contentClasses {
+			if strings.Contains(class, c) {
+				return n
+			}
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findContentArticle(c); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// countArticles counts the number of <article> elements within a node.
+func countArticles(n *html.Node) int {
+	count := 0
+	var countRecursive func(*html.Node)
+	countRecursive = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "article" {
+			count++
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			countRecursive(c)
+		}
+	}
+	countRecursive(n)
+	return count
 }
 
 // findByAttribute finds an element with a specific attribute value.

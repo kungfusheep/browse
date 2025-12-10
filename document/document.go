@@ -745,8 +745,38 @@ func (r *Renderer) extractSpansRecursive(n *html.Node, style render.Style, href 
 			codeStyle.Dim = true
 			*spans = append(*spans, textSpan{Text: child.Text, Style: codeStyle, Href: href, IsImage: isImage})
 		case html.NodeLink:
+			// Build the accent-tinted background
+			// Dark themes: lighten background toward accent color
+			// Light themes: darken background toward accent color
+			bg := theme.Current.Background
+			accent := theme.Current.Accent
+			var bgRGB [3]uint8
+			if theme.Current.Dark {
+				// Add accent tint (lighten toward accent)
+				bgRGB = [3]uint8{
+					uint8(min(255, int(bg.R)+int(accent.R)/4)),
+					uint8(min(255, int(bg.G)+int(accent.G)/4)),
+					uint8(min(255, int(bg.B)+int(accent.B)/4)),
+				}
+			} else {
+				// Subtract toward accent (darken toward accent)
+				bgRGB = [3]uint8{
+					uint8(max(0, int(bg.R)-(255-int(accent.R))/12)),
+					uint8(max(0, int(bg.G)-(255-int(accent.G))/12)),
+					uint8(max(0, int(bg.B)-(255-int(accent.B))/12)),
+				}
+			}
+			// Only add leading block if not already inside a link (avoid double blocks for images-in-links)
+			if href == "" {
+				blockStyle := theme.Current.Accent.Style()
+				blockStyle.UseBgRGB = true
+				blockStyle.BgRGB = bgRGB
+				*spans = append(*spans, textSpan{Text: "▌", Style: blockStyle, Href: child.Href, IsImage: isImage})
+			}
+			// Link text with accent-tinted background
 			linkStyle := style
-			linkStyle.Underline = true
+			linkStyle.UseBgRGB = true
+			linkStyle.BgRGB = bgRGB
 			r.extractSpansRecursive(child, linkStyle, child.Href, isImage, spans)
 		case html.NodeImage:
 			// Images get theme accent color and mark as image for Quick Look
