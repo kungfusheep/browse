@@ -172,6 +172,10 @@ func findContentRoot(doc, body *html.Node) *html.Node {
 		if article := findContentArticle(main); article != nil {
 			return article
 		}
+		// Look for div with content-indicator classes inside main (AP News pattern)
+		if contentDiv := findContentDiv(main); contentDiv != nil {
+			return contentDiv
+		}
 		// Check if main has multiple direct/nested articles (index page pattern)
 		articleCount := countArticles(main)
 		if articleCount >= 2 {
@@ -210,21 +214,25 @@ func findContentRoot(doc, body *html.Node) *html.Node {
 	return body
 }
 
-// findContentArticle finds an article element with classes indicating it's main content
-// (e.g., "markdown-body", "entry-content", "post-content", "article-body").
+// contentIndicatorClasses are classes that indicate an element contains main content.
+var contentIndicatorClasses = []string{
+	"markdown-body",     // GitHub
+	"entry-content",     // WordPress, GitHub
+	"post-content",      // Blogs
+	"article-body",      // News sites
+	"article-content",   // News sites
+	"content-body",      // Generic
+	"RichTextStoryBody", // AP News
+	"story-body",        // Various news sites
+	"article__body",     // BEM-style news sites
+	"post__content",     // BEM-style blogs
+}
+
+// findContentArticle finds an article element with classes indicating it's main content.
 func findContentArticle(n *html.Node) *html.Node {
 	if n.Type == html.ElementNode && n.Data == "article" {
 		class := getAttr(n, "class")
-		// Content-indicator classes used by various sites
-		contentClasses := []string{
-			"markdown-body",  // GitHub
-			"entry-content",  // WordPress, GitHub
-			"post-content",   // Blogs
-			"article-body",   // News sites
-			"article-content",
-			"content-body",
-		}
-		for _, c := range contentClasses {
+		for _, c := range contentIndicatorClasses {
 			if strings.Contains(class, c) {
 				return n
 			}
@@ -232,6 +240,24 @@ func findContentArticle(n *html.Node) *html.Node {
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if found := findContentArticle(c); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// findContentDiv finds a div element with classes indicating it's main content.
+func findContentDiv(n *html.Node) *html.Node {
+	if n.Type == html.ElementNode && (n.Data == "div" || n.Data == "section") {
+		class := getAttr(n, "class")
+		for _, c := range contentIndicatorClasses {
+			if strings.Contains(class, c) {
+				return n
+			}
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findContentDiv(c); found != nil {
 			return found
 		}
 	}
@@ -727,8 +753,10 @@ func countStoryCards(n *html.Node) int {
 			if node.Data == "h2" || node.Data == "h3" {
 				if link := findFirstLink(node); link != nil {
 					href := getAttr(link, "href")
+					text := textContent(link)
 					// Only count if it's a substantial link (not just "#")
-					if href != "" && !strings.HasPrefix(href, "#") && len(textContent(link)) > 10 {
+					// Skip numbered titles like "1. Title" - those are search results, not news
+					if href != "" && !strings.HasPrefix(href, "#") && len(text) > 10 && !looksLikeNumberedItem(text) {
 						count++
 					}
 				}
@@ -740,6 +768,26 @@ func countStoryCards(n *html.Node) int {
 	}
 	countRecursive(n, 0)
 	return count
+}
+
+// looksLikeNumberedItem checks if text starts with a number and period like "1. Title"
+func looksLikeNumberedItem(text string) bool {
+	text = strings.TrimSpace(text)
+	if len(text) < 3 {
+		return false
+	}
+	// Check for patterns like "1. ", "12. ", "123. "
+	for i, ch := range text {
+		if ch >= '0' && ch <= '9' {
+			continue
+		}
+		if ch == '.' && i > 0 && i < len(text)-1 {
+			// Found number followed by period
+			return text[i+1] == ' '
+		}
+		break
+	}
+	return false
 }
 
 // extractArticleList extracts multiple articles as a structured list.
@@ -803,7 +851,8 @@ func extractStoryCards(n *html.Node, list *Node) {
 					text := strings.TrimSpace(textContent(link))
 
 					// Only process substantial links
-					if href != "" && !strings.HasPrefix(href, "#") && len(text) > 10 {
+					// Skip numbered items like "1. Title" - those are search results, not news
+					if href != "" && !strings.HasPrefix(href, "#") && len(text) > 10 && !looksLikeNumberedItem(text) {
 						data := articleData{
 							Title:     text,
 							TitleHref: href,
@@ -1397,6 +1446,16 @@ func extractContentOnly(n *html.Node, parent *Node) {
 
 			case "pre":
 				node := &Node{Type: NodeCodeBlock, Text: preformattedContent(c), ID: getAttr(c, "id")}
+				parent.Children = append(parent.Children, node)
+
+			case "details":
+				// Disclosure widget - render as always-expanded
+				// Extract summary as heading, rest as content
+				extractDetails(c, parent)
+
+			case "summary":
+				// Summary outside of details context - treat as heading
+				node := &Node{Type: NodeHeading3, Text: textContentDeduped(c), ID: getAttr(c, "id")}
 				parent.Children = append(parent.Children, node)
 
 			case "nav", "header", "footer", "aside", "menu":
@@ -2044,6 +2103,46 @@ func getNavLabel(n *html.Node) string {
 		return "Menu"
 	default:
 		return "Links"
+	}
+}
+
+// extractDetails handles <details> disclosure widgets.
+// Renders them as always-expanded: summary becomes a heading, content follows.
+func extractDetails(n *html.Node, parent *Node) {
+	// Find and extract summary first
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "summary" {
+			// Summary becomes a heading
+			node := &Node{Type: NodeHeading3, Text: textContentDeduped(c), ID: getAttr(c, "id")}
+			extractHeadingLink(c, node)
+			parent.Children = append(parent.Children, node)
+			break
+		}
+	}
+
+	// Extract remaining content (everything except summary)
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode {
+			continue
+		}
+		if c.Data == "summary" {
+			continue // Already handled
+		}
+		// Handle specific element types that extractContentOnly expects as children
+		switch c.Data {
+		case "ul", "ol":
+			node := &Node{Type: NodeList, ID: getAttr(c, "id")}
+			extractList(c, node)
+			parent.Children = append(parent.Children, node)
+		case "p":
+			node := &Node{Type: NodeParagraph, ID: getAttr(c, "id")}
+			extractInline(c, node)
+			parent.Children = append(parent.Children, node)
+		case "div", "section":
+			extractContentOnly(c, parent)
+		default:
+			extractContentOnly(c, parent)
+		}
 	}
 }
 

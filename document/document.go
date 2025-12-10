@@ -1592,6 +1592,13 @@ func GenerateLabelsExcluding(count int, exclude string) []string {
 
 // RenderLinkLabels overlays jump labels on visible links.
 func (r *Renderer) RenderLinkLabels(labels []string, inputPrefix string) {
+	// Solid accent background with dark text for maximum visibility
+	accent := theme.Current.Accent
+	accentBg := [3]uint8{accent.R, accent.G, accent.B}
+
+	// Dark text for contrast (black or near-black)
+	darkFg := [3]uint8{0x10, 0x10, 0x10}
+
 	for i, link := range r.links {
 		if i >= len(labels) {
 			break
@@ -1603,21 +1610,44 @@ func (r *Renderer) RenderLinkLabels(labels []string, inputPrefix string) {
 		label := labels[i]
 		matches := strings.HasPrefix(label, inputPrefix)
 
-		// Draw label with typed portion highlighted
-		for j, ch := range label {
-			if link.X+j < r.canvas.Width() {
-				var style render.Style
-				if !matches && inputPrefix != "" {
-					style = theme.Current.LabelDim.Style()
-				} else if j < len(inputPrefix) {
-					style = theme.Current.LabelTyped.Style()
-					style.Bold = true
-				} else {
-					style = theme.Current.Label.Style()
-					style.Reverse = true
-					style.Bold = true
+		// Draw label BEFORE the block marker with a leading space for breathing room
+		// Layout: " ab▌Link" - space + label + block + text
+		labelWidth := len(label) + 1
+		labelStartX := link.X - labelWidth
+
+		// Skip entirely if label would start off-screen
+		if labelStartX < 0 {
+			continue
+		}
+
+		// Skip if non-matching
+		if !matches && inputPrefix != "" {
+			for j, ch := range label {
+				x := labelStartX + 1 + j
+				if x < r.canvas.Width() {
+					r.canvas.Set(x, link.Y, ch, theme.Current.LabelDim.Style())
 				}
-				r.canvas.Set(link.X+j, link.Y, ch, style)
+			}
+			continue
+		}
+
+		// Draw leading space with accent background
+		r.canvas.Set(labelStartX, link.Y, ' ', render.Style{
+			UseBgRGB: true,
+			BgRGB:    accentBg,
+		})
+
+		// Draw label characters
+		for j, ch := range label {
+			x := labelStartX + 1 + j
+			if x < r.canvas.Width() {
+				r.canvas.Set(x, link.Y, ch, render.Style{
+					Bold:     true,
+					UseFgRGB: true,
+					FgRGB:    darkFg,
+					UseBgRGB: true,
+					BgRGB:    accentBg,
+				})
 			}
 		}
 	}

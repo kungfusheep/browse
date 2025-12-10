@@ -798,3 +798,38 @@ func TestFormatDate(t *testing.T) {
 		})
 	}
 }
+
+func TestLooksLikeNumberedItem(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		// Search results style - should match
+		{"1. First Result Title", true},
+		{"2. Second Result", true},
+		{"10. Tenth Result", true},
+		{"123. Some Title", true},
+		{" 5. Leading space", true},
+
+		// Real news headlines - should NOT match
+		{"Why AI is Transforming Everything", false},
+		{"Climate Summit Reaches Historic Agreement", false},
+		{"Stock Markets Hit Record Highs", false},
+		{"2025 Budget Proposal Released", false}, // Year, not numbered item
+		{"The 5 Best Phones of 2025", false},     // Number in middle
+		{"5G Networks Expand", false},            // No period after number
+		{".", false},                             // Too short
+		{"1", false},                             // Too short
+		{"1.", false},                            // Too short
+		{"", false},                              // Empty
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := looksLikeNumberedItem(tt.input)
+			if got != tt.expected {
+				t.Errorf("looksLikeNumberedItem(%q) = %v, expected %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
