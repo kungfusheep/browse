@@ -158,6 +158,12 @@ func Parse(r io.Reader) (*Document, error) {
 
 	// Second pass: extract content (navigation will be skipped)
 	extractContentOnly(contentRoot, result.Content)
+
+	// Post-process: normalize news index pages
+	if looksLikeNewsIndex(result.Content) {
+		normalizeNewsIndex(result.Content)
+	}
+
 	return result, nil
 }
 
@@ -172,14 +178,15 @@ func findContentRoot(doc, body *html.Node) *html.Node {
 		if article := findContentArticle(main); article != nil {
 			return article
 		}
-		// Look for div with content-indicator classes inside main (AP News pattern)
-		if contentDiv := findContentDiv(main); contentDiv != nil {
-			return contentDiv
-		}
-		// Check if main has multiple direct/nested articles (index page pattern)
+		// Check if main has multiple articles FIRST (index page pattern)
+		// Must check before findContentDiv since story-body divs may be nested inside articles
 		articleCount := countArticles(main)
 		if articleCount >= 2 {
 			return main // Index page - keep the container
+		}
+		// Look for div with content-indicator classes inside main (AP News single article pattern)
+		if contentDiv := findContentDiv(main); contentDiv != nil {
+			return contentDiv
 		}
 		// Single or no articles - check if there's any article with real content
 		if article := findElement(main, "article"); article != nil {
@@ -2554,4 +2561,123 @@ func (n *Node) appendStructuredText(sb *strings.Builder, inBlock bool) {
 	for _, child := range n.Children {
 		child.appendStructuredText(sb, isBlock)
 	}
+}
+
+// looksLikeNewsIndex detects news index pages by their structure:
+// - Multiple NodeList children at top level (story groupings)
+// - Many NodeAnchor children (section markers)
+// - Lists contain link-first items (headlines)
+func looksLikeNewsIndex(content *Node) bool {
+	if content == nil {
+		return false
+	}
+
+	var listCount, anchorCount, paragraphCount int
+	var listsHaveLinks int
+
+	for _, child := range content.Children {
+		switch child.Type {
+		case NodeList:
+			listCount++
+			// Check if list items start with links (news headline pattern)
+			if listHasLinkFirstItems(child) {
+				listsHaveLinks++
+			}
+		case NodeAnchor:
+			anchorCount++
+		case NodeParagraph:
+			paragraphCount++
+		}
+	}
+
+	// News index pattern: multiple lists (>=3) with link-first items,
+	// many anchors (>=5), and the lists dominate the structure
+	return listCount >= 3 && listsHaveLinks >= 3 && anchorCount >= 5
+}
+
+// listHasLinkFirstItems checks if a list has items where the first child is a link
+func listHasLinkFirstItems(list *Node) bool {
+	if list == nil || list.Type != NodeList {
+		return false
+	}
+	linkFirstCount := 0
+	for _, item := range list.Children {
+		if item.Type == NodeListItem && len(item.Children) > 0 {
+			if item.Children[0].Type == NodeLink {
+				linkFirstCount++
+			}
+		}
+	}
+	// At least half the items should be link-first
+	return linkFirstCount > 0 && linkFirstCount >= len(list.Children)/2
+}
+
+// normalizeNewsIndex consolidates news index pages:
+// - Merges all story lists into one
+// - Removes empty anchors
+// - Filters out image caption paragraphs
+func normalizeNewsIndex(content *Node) {
+	if content == nil {
+		return
+	}
+
+	// Collect all list items from all lists
+	var allItems []*Node
+	seenLinks := make(map[string]bool) // Deduplicate by URL
+
+	for _, child := range content.Children {
+		if child.Type == NodeList && listHasLinkFirstItems(child) {
+			for _, item := range child.Children {
+				if item.Type == NodeListItem && len(item.Children) > 0 {
+					if link := item.Children[0]; link.Type == NodeLink {
+						// Deduplicate by URL
+						if link.Href != "" && !seenLinks[link.Href] {
+							seenLinks[link.Href] = true
+							allItems = append(allItems, item)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Filter and rebuild children
+	var newChildren []*Node
+
+	// Keep headings (section titles)
+	for _, child := range content.Children {
+		switch child.Type {
+		case NodeHeading1, NodeHeading2, NodeHeading3:
+			newChildren = append(newChildren, child)
+		case NodeParagraph:
+			// Keep non-caption paragraphs (those not starting with "[")
+			text := extractNodeText(child)
+			if !strings.HasPrefix(strings.TrimSpace(text), "[") && len(text) > 20 {
+				newChildren = append(newChildren, child)
+			}
+		}
+	}
+
+	// Add consolidated list if we have items
+	if len(allItems) > 0 {
+		consolidatedList := &Node{
+			Type:     NodeList,
+			Children: allItems,
+		}
+		newChildren = append(newChildren, consolidatedList)
+	}
+
+	content.Children = newChildren
+}
+
+// extractNodeText recursively extracts text from a node
+func extractNodeText(n *Node) string {
+	if n == nil {
+		return ""
+	}
+	text := n.Text
+	for _, child := range n.Children {
+		text += extractNodeText(child)
+	}
+	return text
 }

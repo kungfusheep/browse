@@ -833,3 +833,168 @@ func TestLooksLikeNumberedItem(t *testing.T) {
 		})
 	}
 }
+
+func TestLooksLikeNewsIndex(t *testing.T) {
+	// Helper to create a simple list item with a link first
+	makeListItem := func(href, title string) *Node {
+		return &Node{
+			Type: NodeListItem,
+			Children: []*Node{
+				{Type: NodeLink, Href: href, Children: []*Node{{Type: NodeText, Text: title}}},
+			},
+		}
+	}
+
+	// Helper to create a list with link-first items
+	makeList := func(count int) *Node {
+		list := &Node{Type: NodeList}
+		for i := 0; i < count; i++ {
+			list.Children = append(list.Children, makeListItem("http://example.com/"+string(rune('a'+i)), "Story "+string(rune('A'+i))))
+		}
+		return list
+	}
+
+	tests := []struct {
+		name     string
+		content  *Node
+		expected bool
+	}{
+		{
+			name:     "nil content",
+			content:  nil,
+			expected: false,
+		},
+		{
+			name: "typical news index - many lists and anchors",
+			content: &Node{
+				Type: NodeDocument,
+				Children: []*Node{
+					{Type: NodeAnchor},
+					makeList(3),
+					{Type: NodeAnchor},
+					{Type: NodeParagraph, Text: "Some description"},
+					makeList(3),
+					{Type: NodeAnchor},
+					{Type: NodeAnchor},
+					makeList(3),
+					{Type: NodeAnchor},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "not enough lists",
+			content: &Node{
+				Type: NodeDocument,
+				Children: []*Node{
+					{Type: NodeAnchor},
+					makeList(3),
+					{Type: NodeAnchor},
+					{Type: NodeAnchor},
+					{Type: NodeAnchor},
+					{Type: NodeAnchor},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "not enough anchors",
+			content: &Node{
+				Type: NodeDocument,
+				Children: []*Node{
+					makeList(3),
+					makeList(3),
+					makeList(3),
+					{Type: NodeAnchor},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "regular article page - paragraphs only",
+			content: &Node{
+				Type: NodeDocument,
+				Children: []*Node{
+					{Type: NodeHeading1, Text: "Title"},
+					{Type: NodeParagraph, Text: "Content paragraph 1"},
+					{Type: NodeParagraph, Text: "Content paragraph 2"},
+					{Type: NodeParagraph, Text: "Content paragraph 3"},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := looksLikeNewsIndex(tt.content)
+			if got != tt.expected {
+				t.Errorf("looksLikeNewsIndex() = %v, expected %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestListHasLinkFirstItems(t *testing.T) {
+	tests := []struct {
+		name     string
+		list     *Node
+		expected bool
+	}{
+		{
+			name:     "nil list",
+			list:     nil,
+			expected: false,
+		},
+		{
+			name: "all items start with links",
+			list: &Node{
+				Type: NodeList,
+				Children: []*Node{
+					{Type: NodeListItem, Children: []*Node{{Type: NodeLink, Href: "a"}}},
+					{Type: NodeListItem, Children: []*Node{{Type: NodeLink, Href: "b"}}},
+					{Type: NodeListItem, Children: []*Node{{Type: NodeLink, Href: "c"}}},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "half items start with links",
+			list: &Node{
+				Type: NodeList,
+				Children: []*Node{
+					{Type: NodeListItem, Children: []*Node{{Type: NodeLink, Href: "a"}}},
+					{Type: NodeListItem, Children: []*Node{{Type: NodeText, Text: "Not a link"}}},
+					{Type: NodeListItem, Children: []*Node{{Type: NodeLink, Href: "c"}}},
+					{Type: NodeListItem, Children: []*Node{{Type: NodeText, Text: "Also not a link"}}},
+				},
+			},
+			expected: true, // 2/4 = 50%, which meets threshold
+		},
+		{
+			name: "no items start with links",
+			list: &Node{
+				Type: NodeList,
+				Children: []*Node{
+					{Type: NodeListItem, Children: []*Node{{Type: NodeText, Text: "Text first"}}},
+					{Type: NodeListItem, Children: []*Node{{Type: NodeStrong, Text: "Bold first"}}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:     "wrong node type",
+			list:     &Node{Type: NodeParagraph},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := listHasLinkFirstItems(tt.list)
+			if got != tt.expected {
+				t.Errorf("listHasLinkFirstItems() = %v, expected %v", got, tt.expected)
+			}
+		})
+	}
+}
