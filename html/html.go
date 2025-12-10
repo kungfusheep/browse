@@ -172,16 +172,17 @@ func findContentRoot(doc, body *html.Node) *html.Node {
 	}
 
 	// Strategy 2: Common content div patterns (role="main", id="content", etc.)
+	// Use findContentContainerByID to avoid matching headings with these IDs
 	if content := findByAttribute(body, "role", "main"); content != nil {
 		return content
 	}
-	if content := findByID(body, "content"); content != nil {
+	if content := findContentContainerByID(body, "content"); content != nil {
 		return content
 	}
-	if content := findByID(body, "main-content"); content != nil {
+	if content := findContentContainerByID(body, "main-content"); content != nil {
 		return content
 	}
-	if content := findByID(body, "main"); content != nil {
+	if content := findContentContainerByID(body, "main"); content != nil {
 		return content
 	}
 
@@ -213,6 +214,28 @@ func findByAttribute(n *html.Node, attr, value string) *html.Node {
 // findByID finds an element by its id attribute.
 func findByID(n *html.Node, id string) *html.Node {
 	return findByAttribute(n, "id", id)
+}
+
+// findContentContainerByID finds a container element (div, section, article, main) by ID.
+// This avoids matching headings or other elements that happen to have the same ID.
+func findContentContainerByID(n *html.Node, id string) *html.Node {
+	if n.Type == html.ElementNode {
+		// Only match container-like elements
+		switch n.Data {
+		case "div", "section", "article", "main", "aside":
+			for _, a := range n.Attr {
+				if a.Key == "id" && a.Val == id {
+					return n
+				}
+			}
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findContentContainerByID(c, id); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 // findContentRichDiv finds the div with the most content-like children.

@@ -525,3 +525,38 @@ func TestExtractFilename(t *testing.T) {
 		})
 	}
 }
+
+func TestContentExtractionWithHeadingIdMain(t *testing.T) {
+	// Regression test: pages with <h3 id="main">main</h3> should not treat
+	// the heading as the content container (only div/section/article should match)
+	input := `<!DOCTYPE html>
+<html>
+<body>
+<div class="content">
+  <h1>Page Title</h1>
+  <p>First paragraph.</p>
+  <h3 id="main">main</h3>
+  <p>Content about main function.</p>
+  <p>More content here.</p>
+</div>
+</body>
+</html>`
+
+	doc, err := ParseString(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Should extract ALL content, not just the h3 with id="main"
+	if len(doc.Content.Children) < 4 {
+		t.Errorf("expected at least 4 children (h1, p, h3, p, p), got %d", len(doc.Content.Children))
+	}
+
+	// First child should be the page title, not "main"
+	if doc.Content.Children[0].Type != NodeHeading1 {
+		t.Errorf("expected first child to be NodeHeading1, got %v", doc.Content.Children[0].Type)
+	}
+	if doc.Content.Children[0].Text != "Page Title" {
+		t.Errorf("expected first heading 'Page Title', got %q", doc.Content.Children[0].Text)
+	}
+}
