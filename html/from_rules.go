@@ -16,11 +16,12 @@ func FromRules(result *rules.ApplyResult) *Document {
 	}
 
 	doc := &Document{
+		Title:   formatDomainAsTitle(result.Domain),
 		Content: &Node{Type: NodeDocument},
 	}
 
-	// Add document header with domain as title
-	addDocumentHeader(doc, result)
+	// Add subtitle with item count (title is now in IBM header)
+	addDocumentSubtitle(doc, result)
 
 	// Always use flat list layout for rules-based content
 	// This avoids the document renderer's section numbering (1.1, 1.1.1, etc)
@@ -30,22 +31,9 @@ func FromRules(result *rules.ApplyResult) *Document {
 	return doc
 }
 
-// addDocumentHeader creates a proper header with title and metadata
-// Uses paragraphs instead of headings to avoid document section numbering
-func addDocumentHeader(doc *Document, result *rules.ApplyResult) {
-	// Create title as bold paragraph (not H1 to avoid "1." prefix)
-	title := formatDomainAsTitle(result.Domain)
-	titlePara := &Node{Type: NodeParagraph}
-	titlePara.Children = append(titlePara.Children, &Node{
-		Type: NodeStrong,
-		Children: []*Node{{
-			Type: NodeText,
-			Text: strings.ToUpper(title),
-		}},
-	})
-	doc.Content.Children = append(doc.Content.Children, titlePara)
-
-	// Add a subtitle with item count
+// addDocumentSubtitle adds item count info below the IBM-style header
+func addDocumentSubtitle(doc *Document, result *rules.ApplyResult) {
+	// Add subtitle with item count
 	subtitle := fmt.Sprintf("%d items", len(result.Items))
 	subtitlePara := &Node{Type: NodeParagraph}
 	subtitlePara.Children = append(subtitlePara.Children, &Node{

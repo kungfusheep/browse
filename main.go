@@ -695,7 +695,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		domain := getDomain(url)
 		statusY := height - 1
 
-		// Build status line: domain on left, [W] indicator, scroll % on right
+		// Build status line: [color accent] domain on left, [W] indicator, scroll % on right
 		domainDisplay := domain
 		if len(domainDisplay) > width-15 {
 			domainDisplay = domainDisplay[:width-15] + "…"
@@ -710,19 +710,33 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			pctStr = fmt.Sprintf("%d%%", pct)
 		}
 
+		// Track where to start drawing (after optional theme color accent)
+		statusX := 0
+
+		// Draw theme color accent if available
+		if doc.ThemeColor != "" {
+			if r, g, b, ok := html.ParseHexColor(doc.ThemeColor); ok {
+				canvas.Set(statusX, statusY, '█', render.Style{
+					FgRGB:    [3]uint8{r, g, b},
+					UseFgRGB: true,
+				})
+				statusX += 2 // Leave a space after the accent
+			}
+		}
+
 		// Draw as dim text - subtle but visible
 		if cfg.Display.ShowUrl {
-			canvas.WriteString(0, statusY, domainDisplay, render.Style{Dim: true})
+			canvas.WriteString(statusX, statusY, domainDisplay, render.Style{Dim: true})
+			statusX += len(domainDisplay)
 		}
 
 		// Show wide mode indicator
 		if wideMode {
 			wideIndicator := "[W]"
-			wideX := 0
-			if cfg.Display.ShowUrl {
-				wideX = len(domainDisplay) + 1
+			if statusX > 0 {
+				statusX++ // Add space before [W]
 			}
-			canvas.WriteString(wideX, statusY, wideIndicator, render.Style{Dim: true})
+			canvas.WriteString(statusX, statusY, wideIndicator, render.Style{Dim: true})
 		}
 
 		if pctStr != "" {
@@ -3592,6 +3606,10 @@ func fetchAndParse(url string) (*html.Document, error) {
 
 	// Check for site-specific handlers (HN, etc.)
 	if doc, _ := sites.ParseForURL(url, htmlContent); doc != nil {
+		// Extract and set theme color for site-specific handlers
+		if doc.ThemeColor == "" {
+			doc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
+		}
 		return doc, nil
 	}
 
@@ -3617,6 +3635,10 @@ func fetchWithBrowser(targetURL string) (*html.Document, error) {
 
 	// Check for site-specific handlers (HN, etc.)
 	if doc, _ := sites.ParseForURL(targetURL, result.HTML); doc != nil {
+		// Extract and set theme color for site-specific handlers
+		if doc.ThemeColor == "" {
+			doc.ThemeColor = html.ExtractThemeColorFromHTML(result.HTML)
+		}
 		return doc, nil
 	}
 
@@ -3653,6 +3675,10 @@ func fetchAndParseQuiet(targetURL string) (*html.Document, error) {
 
 	// Check for site-specific handlers (HN, etc.)
 	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
+		// Extract and set theme color for site-specific handlers
+		if doc.ThemeColor == "" {
+			doc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
+		}
 		return doc, nil
 	}
 
@@ -3690,6 +3716,16 @@ func fetchWithBrowserCtx(ctx context.Context, url string) (*html.Document, error
 			resultCh <- result{nil, err}
 			return
 		}
+
+		// Check for site-specific handlers (HN, etc.)
+		if doc, _ := sites.ParseForURL(url, res.HTML); doc != nil {
+			if doc.ThemeColor == "" {
+				doc.ThemeColor = html.ExtractThemeColorFromHTML(res.HTML)
+			}
+			resultCh <- result{doc, nil}
+			return
+		}
+
 		doc, err := html.ParseString(res.HTML)
 		if err != nil {
 			resultCh <- result{nil, fmt.Errorf("parsing HTML: %w", err)}
@@ -3727,12 +3763,22 @@ func fetchQuietWithHTML(targetURL string) (*html.Document, string, error) {
 		return nil, "", fmt.Errorf("reading body: %w", err)
 	}
 
-	doc, err := html.ParseString(string(body))
+	htmlContent := string(body)
+
+	// Check for site-specific handlers (HN, etc.)
+	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
+		if doc.ThemeColor == "" {
+			doc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
+		}
+		return doc, htmlContent, nil
+	}
+
+	doc, err := html.ParseString(htmlContent)
 	if err != nil {
 		return nil, "", fmt.Errorf("parsing HTML: %w", err)
 	}
 
-	return doc, string(body), nil
+	return doc, htmlContent, nil
 }
 
 // fetchWithRules fetches and parses, applying cached rules if available.
@@ -3770,6 +3816,9 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 
 	// Check for site-specific handlers (HN, etc.) - they register via init()
 	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
+		if doc.ThemeColor == "" {
+			doc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
+		}
 		return doc, htmlContent, nil
 	}
 
@@ -3786,6 +3835,10 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 				if rulesDoc := html.FromRules(result); rulesDoc != nil {
 					// Only use rules if they produce better quality output
 					if isRulesDocBetter(rulesDoc, defaultDoc, result) {
+						// Set theme color from original HTML
+						if rulesDoc.ThemeColor == "" {
+							rulesDoc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
+						}
 						return rulesDoc, htmlContent, nil
 					}
 				}

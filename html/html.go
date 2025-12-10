@@ -2,6 +2,7 @@
 package html
 
 import (
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -50,6 +51,7 @@ type Document struct {
 	Title      string  // Page title (from <title> tag)
 	URL        string  // Source URL of the document
 	Lang       string  // Document language (from <html lang="...">)
+	ThemeColor string  // Site theme color (from meta tags or bgcolor)
 	Content    *Node   // Main article content
 	Navigation []*Node // Navigation elements (nav, header, footer links)
 }
@@ -132,6 +134,9 @@ func Parse(r io.Reader) (*Document, error) {
 			}
 		}
 	}
+
+	// Extract theme color from meta tags (priority: theme-color > msapplication-TileColor > bgcolor)
+	result.ThemeColor = extractThemeColor(doc)
 
 	// Extract title from <title> tag
 	if title := findElement(doc, "title"); title != nil {
@@ -305,6 +310,288 @@ func extractText(n *html.Node) string {
 		result.WriteString(extractText(c))
 	}
 	return strings.TrimSpace(whitespaceRe.ReplaceAllString(result.String(), " "))
+}
+
+// extractThemeColor extracts the site theme color from meta tags and attributes.
+// Priority: msapplication-TileColor > bgcolor > theme-color
+// (TileColor and bgcolor tend to be actual brand colors, while theme-color is often white/black)
+func extractThemeColor(doc *html.Node) string {
+	var themeColor, tileColor, bgColor string
+
+	// Find <head> element for meta tags
+	head := findElement(doc, "head")
+	if head != nil {
+		// Look through meta tags
+		var checkMeta func(*html.Node)
+		checkMeta = func(n *html.Node) {
+			if n.Type == html.ElementNode && n.Data == "meta" {
+				name := strings.ToLower(getAttr(n, "name"))
+				content := getAttr(n, "content")
+				if content != "" {
+					switch name {
+					case "theme-color":
+						if themeColor == "" {
+							themeColor = content
+						}
+					case "msapplication-tilecolor":
+						if tileColor == "" {
+							tileColor = content
+						}
+					}
+				}
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				checkMeta(c)
+			}
+		}
+		checkMeta(head)
+	}
+
+	// Check for bgcolor on body or html (legacy sites like HN)
+	if body := findElement(doc, "body"); body != nil {
+		if bg := getAttr(body, "bgcolor"); bg != "" && bgColor == "" {
+			bgColor = bg
+		}
+	}
+	if htmlElem := findElement(doc, "html"); htmlElem != nil {
+		if bg := getAttr(htmlElem, "bgcolor"); bg != "" && bgColor == "" {
+			bgColor = bg
+		}
+	}
+
+	// Return by priority, filtering out unusable colors
+	// TileColor is usually the actual brand color
+	if tileColor != "" {
+		if color := normalizeColor(tileColor); isUsableAccentColor(color) {
+			return color
+		}
+	}
+	// bgcolor is usually meaningful (e.g., HN orange)
+	if bgColor != "" {
+		if color := normalizeColor(bgColor); isUsableAccentColor(color) {
+			return color
+		}
+	}
+	// theme-color is often white/black, but use it as fallback
+	if themeColor != "" {
+		if color := normalizeColor(themeColor); isUsableAccentColor(color) {
+			return color
+		}
+	}
+	return ""
+}
+
+// isUsableAccentColor checks if a color is distinctive enough to be useful as an accent.
+// Filters out white, near-white, black, and near-black colors.
+func isUsableAccentColor(hex string) bool {
+	if hex == "" {
+		return false
+	}
+	r, g, b, ok := ParseHexColor(hex)
+	if !ok {
+		return false
+	}
+
+	// Calculate luminance (simplified)
+	luminance := (int(r) + int(g) + int(b)) / 3
+
+	// Filter out too bright (near white) - threshold ~240
+	if luminance > 240 {
+		return false
+	}
+	// Filter out too dark (near black) - threshold ~15
+	if luminance < 15 {
+		return false
+	}
+
+	return true
+}
+
+// normalizeColor normalizes a color value to a consistent format.
+// Returns lowercase hex color (e.g., "#ff6600") or empty string if invalid.
+func normalizeColor(color string) string {
+	color = strings.TrimSpace(strings.ToLower(color))
+
+	// Already a hex color
+	if strings.HasPrefix(color, "#") {
+		// Expand shorthand (#f60 -> #ff6600)
+		if len(color) == 4 {
+			return "#" + string(color[1]) + string(color[1]) +
+				string(color[2]) + string(color[2]) +
+				string(color[3]) + string(color[3])
+		}
+		if len(color) == 7 {
+			return color
+		}
+		return "" // Invalid format
+	}
+
+	// Named colors (common ones)
+	namedColors := map[string]string{
+		"white":   "#ffffff",
+		"black":   "#000000",
+		"red":     "#ff0000",
+		"green":   "#00ff00",
+		"blue":    "#0000ff",
+		"yellow":  "#ffff00",
+		"orange":  "#ffa500",
+		"purple":  "#800080",
+		"gray":    "#808080",
+		"grey":    "#808080",
+		"silver":  "#c0c0c0",
+		"maroon":  "#800000",
+		"navy":    "#000080",
+		"teal":    "#008080",
+		"aqua":    "#00ffff",
+		"fuchsia": "#ff00ff",
+		"lime":    "#00ff00",
+		"olive":   "#808000",
+	}
+	if hex, ok := namedColors[color]; ok {
+		return hex
+	}
+
+	return "" // Unknown format
+}
+
+// ExtractThemeColorFromHTML extracts the theme color from raw HTML string.
+// This is useful for setting the theme color on documents created by site-specific handlers.
+// Uses lightweight string extraction rather than full HTML parsing.
+// Priority: msapplication-TileColor > bgcolor > theme-color (matching extractThemeColor)
+func ExtractThemeColorFromHTML(htmlContent string) string {
+	lower := strings.ToLower(htmlContent)
+
+	// Try msapplication-TileColor first (usually the actual brand color)
+	if color := extractMetaContent(lower, htmlContent, "msapplication-tilecolor"); color != "" {
+		if normalized := normalizeColor(color); isUsableAccentColor(normalized) {
+			return normalized
+		}
+	}
+
+	// Try bgcolor on body or html (legacy sites like HN)
+	if idx := strings.Index(lower, "bgcolor="); idx != -1 {
+		// Skip past "bgcolor=" to get the value
+		color := extractAttrValue(htmlContent[idx+8:])
+		if color != "" {
+			if normalized := normalizeColor(color); isUsableAccentColor(normalized) {
+				return normalized
+			}
+		}
+	}
+
+	// Try theme-color as fallback (often white/black, but sometimes useful)
+	if color := extractMetaContent(lower, htmlContent, "theme-color"); color != "" {
+		if normalized := normalizeColor(color); isUsableAccentColor(normalized) {
+			return normalized
+		}
+	}
+
+	return ""
+}
+
+// extractMetaContent extracts content attribute from a meta tag with given name.
+func extractMetaContent(lowerHTML, originalHTML, metaName string) string {
+	// Look for meta name="..." pattern
+	searchName := `name="` + metaName + `"`
+	idx := strings.Index(lowerHTML, searchName)
+	if idx == -1 {
+		// Try with single quotes
+		searchName = `name='` + metaName + `'`
+		idx = strings.Index(lowerHTML, searchName)
+	}
+	if idx == -1 {
+		return ""
+	}
+
+	// Find the content attribute nearby (within 100 chars)
+	start := idx
+	end := idx + 100
+	if end > len(lowerHTML) {
+		end = len(lowerHTML)
+	}
+	snippet := lowerHTML[start:end]
+	origSnippet := originalHTML[start:end]
+
+	contentIdx := strings.Index(snippet, "content=")
+	if contentIdx == -1 {
+		return ""
+	}
+
+	return extractAttrValue(origSnippet[contentIdx+8:])
+}
+
+// extractAttrValue extracts a quoted or unquoted attribute value.
+func extractAttrValue(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return ""
+	}
+
+	quote := s[0]
+	if quote == '"' || quote == '\'' {
+		end := strings.IndexByte(s[1:], quote)
+		if end == -1 {
+			return ""
+		}
+		return s[1 : end+1]
+	}
+
+	// Unquoted - ends at space or >
+	end := strings.IndexAny(s, " \t\n\r>")
+	if end == -1 {
+		return s
+	}
+	return s[:end]
+}
+
+// ParseHexColor converts a hex color string to RGB values.
+// Returns r, g, b values (0-255) and ok=true if successful.
+func ParseHexColor(hex string) (r, g, b uint8, ok bool) {
+	hex = strings.TrimPrefix(strings.ToLower(hex), "#")
+
+	// Handle shorthand (#f60 -> ff6600)
+	if len(hex) == 3 {
+		hex = string(hex[0]) + string(hex[0]) +
+			string(hex[1]) + string(hex[1]) +
+			string(hex[2]) + string(hex[2])
+	}
+
+	if len(hex) != 6 {
+		return 0, 0, 0, false
+	}
+
+	// Parse each component
+	var ri, gi, bi int64
+	var err error
+	if ri, err = parseHexByte(hex[0:2]); err != nil {
+		return 0, 0, 0, false
+	}
+	if gi, err = parseHexByte(hex[2:4]); err != nil {
+		return 0, 0, 0, false
+	}
+	if bi, err = parseHexByte(hex[4:6]); err != nil {
+		return 0, 0, 0, false
+	}
+
+	return uint8(ri), uint8(gi), uint8(bi), true
+}
+
+func parseHexByte(s string) (int64, error) {
+	var result int64
+	for _, c := range s {
+		result <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			result |= int64(c - '0')
+		case c >= 'a' && c <= 'f':
+			result |= int64(c - 'a' + 10)
+		case c >= 'A' && c <= 'F':
+			result |= int64(c - 'A' + 10)
+		default:
+			return 0, fmt.Errorf("invalid hex character: %c", c)
+		}
+	}
+	return result, nil
 }
 
 // extractNavigation walks the tree and extracts all navigation elements.

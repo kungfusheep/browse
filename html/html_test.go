@@ -198,6 +198,180 @@ func TestFromTemplateWithLinks(t *testing.T) {
 }
 
 
+func TestThemeColorExtraction(t *testing.T) {
+	tests := []struct {
+		name     string
+		html     string
+		expected string
+	}{
+		{
+			name: "theme-color meta tag",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#ff6600">
+			</head><body><p>Content</p></body></html>`,
+			expected: "#ff6600",
+		},
+		{
+			name: "msapplication-TileColor",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="msapplication-TileColor" content="#da532c">
+			</head><body><p>Content</p></body></html>`,
+			expected: "#da532c",
+		},
+		{
+			name: "body bgcolor (legacy HN style)",
+			html: `<!DOCTYPE html><html><head></head>
+				<body bgcolor="#ff6600"><p>Content</p></body></html>`,
+			expected: "#ff6600",
+		},
+		{
+			name: "TileColor takes priority over theme-color",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#1e2327">
+				<meta name="msapplication-TileColor" content="#da532c">
+			</head><body><p>Content</p></body></html>`,
+			expected: "#da532c",
+		},
+		{
+			name: "bgcolor takes priority over theme-color",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#1e2327">
+			</head><body bgcolor="#ff6600"><p>Content</p></body></html>`,
+			expected: "#ff6600",
+		},
+		{
+			name: "shorthand hex expansion",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#f60">
+			</head><body><p>Content</p></body></html>`,
+			expected: "#ff6600",
+		},
+		{
+			name: "named color",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="orange">
+			</head><body><p>Content</p></body></html>`,
+			expected: "#ffa500",
+		},
+		{
+			name: "white theme-color filtered out",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#ffffff">
+			</head><body><p>Content</p></body></html>`,
+			expected: "",
+		},
+		{
+			name: "black theme-color filtered out",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#000000">
+			</head><body><p>Content</p></body></html>`,
+			expected: "",
+		},
+		{
+			name: "white theme-color but usable TileColor",
+			html: `<!DOCTYPE html><html><head>
+				<meta name="theme-color" content="#ffffff">
+				<meta name="msapplication-TileColor" content="#da532c">
+			</head><body><p>Content</p></body></html>`,
+			expected: "#da532c",
+		},
+		{
+			name: "no theme color",
+			html: `<!DOCTYPE html><html><head></head>
+				<body><p>Content</p></body></html>`,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, err := ParseString(tt.html)
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+			if doc.ThemeColor != tt.expected {
+				t.Errorf("ThemeColor = %q, expected %q", doc.ThemeColor, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractThemeColorFromHTML(t *testing.T) {
+	tests := []struct {
+		name     string
+		html     string
+		expected string
+	}{
+		{
+			name:     "theme-color meta tag",
+			html:     `<html><head><meta name="theme-color" content="#ff6600"></head></html>`,
+			expected: "#ff6600",
+		},
+		{
+			name:     "HN-style bgcolor",
+			html:     `<html><head></head><body bgcolor="#ff6600">content</body></html>`,
+			expected: "#ff6600",
+		},
+		{
+			name:     "case insensitive meta name",
+			html:     `<html><head><meta name="Theme-Color" content="#123456"></head></html>`,
+			expected: "#123456",
+		},
+		{
+			name:     "single quoted content",
+			html:     `<html><head><meta name="theme-color" content='#abcdef'></head></html>`,
+			expected: "#abcdef",
+		},
+		{
+			name:     "no theme color",
+			html:     `<html><head></head><body>no color</body></html>`,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractThemeColorFromHTML(tt.html)
+			if got != tt.expected {
+				t.Errorf("ExtractThemeColorFromHTML() = %q, expected %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseHexColor(t *testing.T) {
+	tests := []struct {
+		hex      string
+		r, g, b  uint8
+		expected bool
+	}{
+		{"#ff6600", 255, 102, 0, true},
+		{"#FF6600", 255, 102, 0, true},
+		{"ff6600", 255, 102, 0, true},
+		{"#f60", 255, 102, 0, true},
+		{"#000000", 0, 0, 0, true},
+		{"#ffffff", 255, 255, 255, true},
+		{"#1e2327", 30, 35, 39, true},
+		{"invalid", 0, 0, 0, false},
+		{"#gg0000", 0, 0, 0, false},
+		{"#ff", 0, 0, 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.hex, func(t *testing.T) {
+			r, g, b, ok := ParseHexColor(tt.hex)
+			if ok != tt.expected {
+				t.Errorf("ParseHexColor(%q) ok = %v, expected %v", tt.hex, ok, tt.expected)
+				return
+			}
+			if ok && (r != tt.r || g != tt.g || b != tt.b) {
+				t.Errorf("ParseHexColor(%q) = (%d,%d,%d), expected (%d,%d,%d)",
+					tt.hex, r, g, b, tt.r, tt.g, tt.b)
+			}
+		})
+	}
+}
+
 func TestNavigationExtraction(t *testing.T) {
 	input := `<!DOCTYPE html>
 <html>
