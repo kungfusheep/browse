@@ -38,10 +38,11 @@ func MaxContentWidth() int {
 
 // Link represents a clickable link in the document.
 type Link struct {
-	Href   string
-	Text   string // link text for display
-	X, Y   int    // position on canvas
-	Length int    // display length for highlighting
+	Href    string
+	Text    string // link text for display
+	X, Y    int    // position on canvas
+	Length  int    // display length for highlighting
+	IsImage bool   // true if this link came from an <img> tag (always open in Quick Look)
 }
 
 // Input represents an interactive input field in the document.
@@ -681,11 +682,12 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 				} else {
 					// Start new link
 					link := Link{
-						Href:   span.Href,
-						Text:   span.Text,
-						X:      x,
-						Y:      r.y,
-						Length: render.StringWidth(span.Text),
+						Href:    span.Href,
+						Text:    span.Text,
+						X:       x,
+						Y:       r.y,
+						Length:  render.StringWidth(span.Text),
+						IsImage: span.IsImage,
 					}
 					r.links = append(r.links, link)
 					currentLink = &r.links[len(r.links)-1]
@@ -701,52 +703,58 @@ func (r *Renderer) renderParagraph(n *html.Node) {
 }
 
 type textSpan struct {
-	Text  string
-	Style render.Style
-	Href  string
+	Text    string
+	Style   render.Style
+	Href    string
+	IsImage bool // true if this span is from an <img> tag
 }
 
 func (r *Renderer) extractSpans(n *html.Node) []textSpan {
 	var spans []textSpan
-	r.extractSpansRecursive(n, render.Style{}, "", &spans)
+	r.extractSpansRecursive(n, render.Style{}, "", false, &spans)
 	return spans
 }
 
-func (r *Renderer) extractSpansRecursive(n *html.Node, style render.Style, href string, spans *[]textSpan) {
+func (r *Renderer) extractSpansRecursive(n *html.Node, style render.Style, href string, isImage bool, spans *[]textSpan) {
 	for _, child := range n.Children {
 		switch child.Type {
 		case html.NodeText:
 			if child.Text != "" {
-				*spans = append(*spans, textSpan{Text: child.Text, Style: style, Href: href})
+				*spans = append(*spans, textSpan{Text: child.Text, Style: style, Href: href, IsImage: isImage})
 			}
 		case html.NodeStrong:
 			boldStyle := style
 			boldStyle.Bold = true
-			r.extractSpansRecursive(child, boldStyle, href, spans)
+			r.extractSpansRecursive(child, boldStyle, href, isImage, spans)
 		case html.NodeEmphasis:
 			emStyle := style
 			emStyle.Underline = true
-			r.extractSpansRecursive(child, emStyle, href, spans)
+			r.extractSpansRecursive(child, emStyle, href, isImage, spans)
 		case html.NodeMark:
 			markStyle := style
 			markStyle.Reverse = true
 			markStyle.FgColor = render.ColorWhite
-			r.extractSpansRecursive(child, markStyle, href, spans)
+			r.extractSpansRecursive(child, markStyle, href, isImage, spans)
 		case html.NodeMarkInsert:
 			insertStyle := style
 			insertStyle.Reverse = true
 			insertStyle.FgColor = render.ColorWhite
-			r.extractSpansRecursive(child, insertStyle, href, spans)
+			r.extractSpansRecursive(child, insertStyle, href, isImage, spans)
 		case html.NodeCode:
 			codeStyle := style
 			codeStyle.Dim = true
-			*spans = append(*spans, textSpan{Text: child.Text, Style: codeStyle, Href: href})
+			*spans = append(*spans, textSpan{Text: child.Text, Style: codeStyle, Href: href, IsImage: isImage})
 		case html.NodeLink:
 			linkStyle := style
 			linkStyle.Underline = true
-			r.extractSpansRecursive(child, linkStyle, child.Href, spans)
+			r.extractSpansRecursive(child, linkStyle, child.Href, isImage, spans)
+		case html.NodeImage:
+			// Images get theme accent color and mark as image for Quick Look
+			imgStyle := theme.Current.Accent.Style()
+			imgStyle.Bold = true
+			r.extractSpansRecursive(child, imgStyle, href, true, spans) // isImage = true
 		default:
-			r.extractSpansRecursive(child, style, href, spans)
+			r.extractSpansRecursive(child, style, href, isImage, spans)
 		}
 	}
 }
@@ -755,15 +763,16 @@ func (r *Renderer) wrapSpans(spans []textSpan, width int) [][]textSpan {
 	// Build a character-to-span index so we can map wrapped text back to original spans
 	var fullText strings.Builder
 	type charInfo struct {
-		style render.Style
-		href  string
+		style   render.Style
+		href    string
+		isImage bool
 	}
 	var charMap []charInfo
 
 	for _, span := range spans {
 		for _, ch := range span.Text {
 			fullText.WriteRune(ch)
-			charMap = append(charMap, charInfo{style: span.Style, href: span.Href})
+			charMap = append(charMap, charInfo{style: span.Style, href: span.Href, isImage: span.IsImage})
 		}
 	}
 
@@ -791,19 +800,21 @@ func (r *Renderer) wrapSpans(spans []textSpan, width int) [][]textSpan {
 					info := charMap[origPos]
 					spanStart := j
 
-					// Collect consecutive chars with same style/href
+					// Collect consecutive chars with same style/href/isImage
 					for j < len(lineRunes) && origPos < len(origRunes) &&
 						lineRunes[j] == origRunes[origPos] &&
 						charMap[origPos].href == info.href &&
-						charMap[origPos].style == info.style {
+						charMap[origPos].style == info.style &&
+						charMap[origPos].isImage == info.isImage {
 						j++
 						origPos++
 					}
 
 					lineSpans = append(lineSpans, textSpan{
-						Text:  string(lineRunes[spanStart:j]),
-						Style: info.style,
-						Href:  info.href,
+						Text:    string(lineRunes[spanStart:j]),
+						Style:   info.style,
+						Href:    info.href,
+						IsImage: info.isImage,
 					})
 				} else if lineRunes[j] == ' ' {
 					// Justification space - add as unstyled
@@ -887,7 +898,7 @@ func (r *Renderer) renderList(n *html.Node) {
 	for _, item := range n.Children {
 		// Build spans from list item (preserving links)
 		var spans []textSpan
-		r.extractSpansRecursive(item, render.Style{}, "", &spans)
+		r.extractSpansRecursive(item, render.Style{}, "", false, &spans)
 
 		// Wrap the spans (not justified for lists)
 		lines := r.wrapSpansNoJustify(spans, r.contentWidth-4)
@@ -909,11 +920,12 @@ func (r *Renderer) renderList(n *html.Node) {
 					} else {
 						// Start new link
 						link := Link{
-							Href:   span.Href,
-							Text:   span.Text,
-							X:      x,
-							Y:      r.y,
-							Length: render.StringWidth(span.Text),
+							Href:    span.Href,
+							Text:    span.Text,
+							X:       x,
+							Y:       r.y,
+							Length:  render.StringWidth(span.Text),
+							IsImage: span.IsImage,
 						}
 						r.links = append(r.links, link)
 						currentLink = &r.links[len(r.links)-1]
@@ -933,15 +945,16 @@ func (r *Renderer) wrapSpansNoJustify(spans []textSpan, width int) [][]textSpan 
 	// Build full text and character map
 	var fullText strings.Builder
 	type charInfo struct {
-		style render.Style
-		href  string
+		style   render.Style
+		href    string
+		isImage bool
 	}
 	var charMap []charInfo
 
 	for _, span := range spans {
 		for _, ch := range span.Text {
 			fullText.WriteRune(ch)
-			charMap = append(charMap, charInfo{style: span.Style, href: span.Href})
+			charMap = append(charMap, charInfo{style: span.Style, href: span.Href, isImage: span.IsImage})
 		}
 	}
 
@@ -965,15 +978,17 @@ func (r *Renderer) wrapSpansNoJustify(spans []textSpan, width int) [][]textSpan 
 				for j < len(lineRunes) && origPos < len(origRunes) &&
 					lineRunes[j] == origRunes[origPos] &&
 					charMap[origPos].href == info.href &&
-					charMap[origPos].style == info.style {
+					charMap[origPos].style == info.style &&
+					charMap[origPos].isImage == info.isImage {
 					j++
 					origPos++
 				}
 
 				lineSpans = append(lineSpans, textSpan{
-					Text:  string(lineRunes[spanStart:j]),
-					Style: info.style,
-					Href:  info.href,
+					Text:    string(lineRunes[spanStart:j]),
+					Style:   info.style,
+					Href:    info.href,
+					IsImage: info.isImage,
 				})
 			} else if lineRunes[j] == ' ' {
 				spanStart := j

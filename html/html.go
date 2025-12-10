@@ -93,10 +93,11 @@ const (
 	NodeCode
 	NodeCodeBlock
 	NodeLink
+	NodeImage // Image link (styled distinctively, clickable to open in Quick Look)
 	NodeText
 	NodeStrong
 	NodeEmphasis
-	NodeMark       // Highlighted/marked text (renders with reverse video)
+	NodeMark // Highlighted/marked text (renders with reverse video)
 	NodeMarkInsert // Insert-mode cursor (renders with reverse video + color)
 	NodeForm
 	NodeInput
@@ -659,6 +660,28 @@ func extractContentOnly(n *html.Node, parent *Node) {
 			case "style", "script", "noscript", "template":
 				// Skip non-content elements (CSS, JS, etc.)
 				continue
+
+			case "img":
+				// Extract image as a followable link with distinctive styling
+				src := getAttr(c, "src")
+				if src != "" {
+					alt := getAttr(c, "alt")
+					if alt == "" {
+						// Use filename from src as fallback
+						alt = extractFilename(src)
+					}
+					if alt == "" {
+						alt = "image"
+					}
+					// Create as NodeImage wrapping a link (opens in Quick Look)
+					node := &Node{Type: NodeParagraph}
+					img := &Node{Type: NodeImage}
+					link := &Node{Type: NodeLink, Href: src}
+					link.Children = append(link.Children, &Node{Type: NodeText, Text: "[Image: " + alt + "]"})
+					img.Children = append(img.Children, link)
+					node.Children = append(node.Children, img)
+					parent.Children = append(parent.Children, node)
+				}
 
 			case "article":
 				// Add a separator before each article (except first)
@@ -1319,6 +1342,24 @@ func extractInline(n *html.Node, parent *Node) {
 			case "code":
 				parent.Children = append(parent.Children, &Node{Type: NodeCode, Text: textContent(c)})
 
+			case "img":
+				// Inline image - render with distinctive styling
+				src := getAttr(c, "src")
+				if src != "" {
+					alt := getAttr(c, "alt")
+					if alt == "" {
+						alt = extractFilename(src)
+					}
+					if alt == "" {
+						alt = "image"
+					}
+					img := &Node{Type: NodeImage}
+					link := &Node{Type: NodeLink, Href: src}
+					link.Children = append(link.Children, &Node{Type: NodeText, Text: "[Image: " + alt + "]"})
+					img.Children = append(img.Children, link)
+					parent.Children = append(parent.Children, img)
+				}
+
 			case "style", "script", "noscript", "template":
 				// Skip non-content elements
 				continue
@@ -1438,6 +1479,23 @@ func textContentDeduped(n *html.Node) string {
 		}
 	}
 	return strings.Join(result, " ")
+}
+
+// extractFilename extracts the filename from a URL path.
+func extractFilename(url string) string {
+	// Remove query string and fragment
+	if idx := strings.IndexAny(url, "?#"); idx != -1 {
+		url = url[:idx]
+	}
+	// Get last path component
+	if idx := strings.LastIndex(url, "/"); idx != -1 {
+		url = url[idx+1:]
+	}
+	// Remove extension for cleaner display
+	if idx := strings.LastIndex(url, "."); idx != -1 {
+		url = url[:idx]
+	}
+	return url
 }
 
 // findChildImg looks for an img element as a direct or nested child.

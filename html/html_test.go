@@ -419,3 +419,109 @@ func TestNavigationExtraction(t *testing.T) {
 		t.Error("expected to find 'Main navigation' section")
 	}
 }
+
+func TestImageExtraction(t *testing.T) {
+	tests := []struct {
+		name         string
+		html         string
+		expectImages int
+		expectAlt    string
+		expectHref   string
+	}{
+		{
+			name:         "img with alt text",
+			html:         `<article><img src="/images/logo.png" alt="Company Logo"></article>`,
+			expectImages: 1,
+			expectAlt:    "[Image: Company Logo]",
+			expectHref:   "/images/logo.png",
+		},
+		{
+			name:         "img without alt uses filename",
+			html:         `<article><img src="/path/to/screenshot.jpg"></article>`,
+			expectImages: 1,
+			expectAlt:    "[Image: screenshot]",
+			expectHref:   "/path/to/screenshot.jpg",
+		},
+		{
+			name:         "img with query string",
+			html:         `<article><img src="https://example.com/photo.png?size=large"></article>`,
+			expectImages: 1,
+			expectAlt:    "[Image: photo]",
+			expectHref:   "https://example.com/photo.png?size=large",
+		},
+		{
+			name:         "inline img in paragraph",
+			html:         `<article><p>Here is an image: <img src="/icon.gif" alt="icon"> in text</p></article>`,
+			expectImages: 1,
+			expectAlt:    "[Image: icon]",
+			expectHref:   "/icon.gif",
+		},
+		{
+			name:         "multiple images",
+			html:         `<article><img src="/a.png" alt="A"><img src="/b.png" alt="B"></article>`,
+			expectImages: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, err := ParseString(tt.html)
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+
+			// Count image links
+			var images []*Node
+			var findImages func(n *Node)
+			findImages = func(n *Node) {
+				if n.Type == NodeLink && strings.HasPrefix(n.PlainText(), "[Image:") {
+					images = append(images, n)
+				}
+				for _, child := range n.Children {
+					findImages(child)
+				}
+			}
+			findImages(doc.Content)
+
+			if len(images) != tt.expectImages {
+				t.Errorf("expected %d images, got %d", tt.expectImages, len(images))
+			}
+
+			if tt.expectAlt != "" && len(images) > 0 {
+				if text := images[0].PlainText(); text != tt.expectAlt {
+					t.Errorf("expected alt %q, got %q", tt.expectAlt, text)
+				}
+			}
+
+			if tt.expectHref != "" && len(images) > 0 {
+				if images[0].Href != tt.expectHref {
+					t.Errorf("expected href %q, got %q", tt.expectHref, images[0].Href)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractFilename(t *testing.T) {
+	tests := []struct {
+		url      string
+		expected string
+	}{
+		{"/images/logo.png", "logo"},
+		{"https://example.com/path/to/screenshot.jpg", "screenshot"},
+		{"/photo.png?size=large&format=webp", "photo"},
+		{"/image.gif#section", "image"},
+		{"simple.png", "simple"},
+		{"/no-extension", "no-extension"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := extractFilename(tt.url)
+			if got != tt.expected {
+				t.Errorf("extractFilename(%q) = %q, expected %q", tt.url, got, tt.expected)
+			}
+		})
+	}
+}

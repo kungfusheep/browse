@@ -1378,13 +1378,14 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						newURL := resolveURL(url, links[i].Href)
 
 						// Check if this is an image link - preview with Quick Look gallery
-						if isImageURL(newURL) {
+						// Use IsImage flag (from <img> tags) OR URL pattern detection
+						if links[i].IsImage || isImageURL(newURL) {
 							// Find all image links on the page
 							allImageURLs := []string{}
 							startIndex := 0
 							for _, link := range links {
 								linkURL := resolveURL(url, link.Href)
-								if isImageURL(linkURL) {
+								if link.IsImage || isImageURL(linkURL) {
 									allImageURLs = append(allImageURLs, linkURL)
 									if linkURL == newURL {
 										startIndex = len(allImageURLs) - 1
