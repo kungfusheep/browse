@@ -560,3 +560,241 @@ func TestContentExtractionWithHeadingIdMain(t *testing.T) {
 		t.Errorf("expected first heading 'Page Title', got %q", doc.Content.Children[0].Text)
 	}
 }
+
+func TestArticleListDetection(t *testing.T) {
+	// Test that pages with multiple articles are detected and extracted as lists
+	input := `<!DOCTYPE html>
+<html>
+<body>
+<main>
+  <article>
+    <h2><a href="/article/1">First Article Title Is Long Enough</a></h2>
+    <p>This is the description of the first article with enough text to be considered substantial content.</p>
+    <span class="author">John Smith</span>
+    <time datetime="2025-12-10">Dec 10, 2025</time>
+  </article>
+  <article>
+    <h2><a href="/article/2">Second Article Has a Great Headline</a></h2>
+    <p>Description for the second article which also has plenty of text to qualify as a description.</p>
+    <span class="byline">Jane Doe</span>
+    <time datetime="2025-12-09">Dec 9, 2025</time>
+  </article>
+  <article>
+    <h2><a href="/article/3">Third Article Completes the Set</a></h2>
+    <p>The third article description rounds out our test with more substantial paragraph text here.</p>
+    <span class="author">Bob Wilson</span>
+    <time datetime="2025-12-08">Dec 8, 2025</time>
+  </article>
+</main>
+</body>
+</html>`
+
+	doc, err := ParseString(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Should have a NodeList as the first child (after any anchor)
+	var list *Node
+	for _, child := range doc.Content.Children {
+		if child.Type == NodeList {
+			list = child
+			break
+		}
+	}
+
+	if list == nil {
+		t.Fatal("expected a NodeList for multiple articles")
+	}
+
+	if len(list.Children) != 3 {
+		t.Errorf("expected 3 list items, got %d", len(list.Children))
+	}
+
+	// Check first article has title link
+	item := list.Children[0]
+	var foundLink bool
+	var linkHref, linkText string
+	for _, child := range item.Children {
+		if child.Type == NodeLink {
+			foundLink = true
+			linkHref = child.Href
+			linkText = child.PlainText()
+		}
+	}
+
+	if !foundLink {
+		t.Error("expected first list item to have a link")
+	}
+	if linkHref != "/article/1" {
+		t.Errorf("expected href '/article/1', got %q", linkHref)
+	}
+	if !strings.Contains(linkText, "First Article") {
+		t.Errorf("expected link text containing 'First Article', got %q", linkText)
+	}
+
+	// Check that item has description and metadata
+	plainText := item.PlainText()
+	if !strings.Contains(plainText, "description") {
+		t.Errorf("expected item to contain description, got %q", plainText)
+	}
+}
+
+func TestArticleListSingleArticleNotTriggered(t *testing.T) {
+	// Single article pages should NOT be converted to lists
+	input := `<!DOCTYPE html>
+<html>
+<body>
+<article>
+  <h1>A Single Full Article</h1>
+  <p>This is a complete article with multiple paragraphs of content.</p>
+  <p>The second paragraph continues the article.</p>
+  <p>And a third paragraph to round it out.</p>
+</article>
+</body>
+</html>`
+
+	doc, err := ParseString(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Should NOT have a NodeList - should have heading and paragraphs
+	for _, child := range doc.Content.Children {
+		if child.Type == NodeList {
+			t.Error("single article page should not be converted to list")
+			break
+		}
+	}
+
+	// Should have the content extracted normally
+	if len(doc.Content.Children) < 3 {
+		t.Errorf("expected at least 3 children (h1 + paragraphs), got %d", len(doc.Content.Children))
+	}
+}
+
+func TestArticleListSkipsSponsored(t *testing.T) {
+	// Sponsored/ad articles should be skipped
+	input := `<!DOCTYPE html>
+<html>
+<body>
+<main>
+  <article>
+    <h2><a href="/1">Real Article One With Title</a></h2>
+    <p>A genuine article with substantial description text for the first item.</p>
+  </article>
+  <article class="sponsored">
+    <h2><a href="/sponsored">Sponsored Content Here</a></h2>
+    <p>This is sponsored content and should be skipped.</p>
+  </article>
+  <article>
+    <h2><a href="/2">Real Article Two With Title</a></h2>
+    <p>Another genuine article with enough description text to qualify.</p>
+  </article>
+  <article class="ad-unit">
+    <h2><a href="/ad">Advertisement Link</a></h2>
+    <p>This is an ad and should also be skipped.</p>
+  </article>
+  <article>
+    <h2><a href="/3">Real Article Three With Title</a></h2>
+    <p>The third genuine article with sufficient content for a description.</p>
+  </article>
+</main>
+</body>
+</html>`
+
+	doc, err := ParseString(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Find the list
+	var list *Node
+	for _, child := range doc.Content.Children {
+		if child.Type == NodeList {
+			list = child
+			break
+		}
+	}
+
+	if list == nil {
+		t.Fatal("expected a NodeList")
+	}
+
+	// Should have exactly 3 items (sponsored/ad articles skipped)
+	if len(list.Children) != 3 {
+		t.Errorf("expected 3 list items (ads skipped), got %d", len(list.Children))
+	}
+
+	// Verify none of the items are sponsored
+	for _, item := range list.Children {
+		text := item.PlainText()
+		if strings.Contains(text, "Sponsored") || strings.Contains(text, "Advertisement") {
+			t.Errorf("sponsored content should be skipped: %q", text)
+		}
+	}
+}
+
+func TestTruncateDescription(t *testing.T) {
+	tests := []struct {
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{"Short text", 100, "Short text"},
+		{"This is a longer description that needs to be truncated at a word boundary", 50, "This is a longer description that needs to be..."},
+		{"NoSpacesInThisTextSoItWillBeCutRightAtTheLimit", 20, "NoSpacesInThisTextSo..."},
+		{"", 100, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input[:min(20, len(tt.input))], func(t *testing.T) {
+			got := truncateDescription(tt.input, tt.maxLen)
+			if got != tt.expected {
+				t.Errorf("truncateDescription(%q, %d) = %q, expected %q", tt.input, tt.maxLen, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractDomain(t *testing.T) {
+	tests := []struct {
+		url      string
+		expected string
+	}{
+		{"https://www.example.com/path", "example.com"},
+		{"http://news.site.org/article", "news.site.org"},
+		{"/relative/path", ""},
+		{"https://nytimes.com/section/tech", "nytimes.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := extractDomain(tt.url)
+			if got != tt.expected {
+				t.Errorf("extractDomain(%q) = %q, expected %q", tt.url, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFormatDate(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"2025-12-10T10:30:00Z", "Dec 10, 2025"},
+		{"2025-01-05", "Jan 5, 2025"},
+		{"2025-06-15T00:00:00.000Z", "Jun 15, 2025"},
+		{"Dec 10", "Dec 10"}, // Already formatted, return as-is
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := formatDate(tt.input)
+			if got != tt.expected {
+				t.Errorf("formatDate(%q) = %q, expected %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}

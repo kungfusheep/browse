@@ -163,12 +163,14 @@ func Parse(r io.Reader) (*Document, error) {
 
 // findContentRoot finds the best element to extract content from.
 func findContentRoot(doc, body *html.Node) *html.Node {
-	// Strategy 1: Semantic elements (article, main)
-	if article := findElement(doc, "article"); article != nil {
-		return article
-	}
+	// Strategy 1: Semantic elements (main first, then article)
+	// Check <main> before <article> because index pages often have multiple
+	// <article> elements inside <main>, and we want the full container
 	if main := findElement(doc, "main"); main != nil {
 		return main
+	}
+	if article := findElement(doc, "article"); article != nil {
+		return article
 	}
 
 	// Strategy 2: Common content div patterns (role="main", id="content", etc.)
@@ -618,6 +620,662 @@ func parseHexByte(s string) (int64, error) {
 	return result, nil
 }
 
+// articleData holds extracted data from an article element.
+type articleData struct {
+	Title       string
+	TitleHref   string
+	Description string
+	Author      string
+	Date        string
+	Source      string // domain name from title href
+}
+
+// shouldExtractAsArticleList checks if a container has enough article children
+// to be treated as an article listing page (like a news index).
+func shouldExtractAsArticleList(n *html.Node) bool {
+	// Strategy 1: Count direct <article> children
+	articleCount := 0
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "article" {
+			// Skip sponsored/ad articles
+			class := getAttr(c, "class")
+			if strings.Contains(class, "sponsored") || strings.Contains(class, "ad-") ||
+				strings.Contains(class, "promo") || strings.Contains(class, "advertisement") {
+				continue
+			}
+			articleCount++
+		}
+	}
+	if articleCount >= 3 {
+		return true
+	}
+
+	// Strategy 2: Look for repeated heading+link patterns (story cards)
+	// This handles sites like NYTimes where articles contain multiple stories
+	storyCount := countStoryCards(n)
+	return storyCount >= 3
+}
+
+// countStoryCards counts heading+link patterns that look like story cards.
+func countStoryCards(n *html.Node) int {
+	count := 0
+	var countRecursive func(*html.Node, int)
+	countRecursive = func(node *html.Node, depth int) {
+		if depth > 5 {
+			return // Don't go too deep
+		}
+		if node.Type == html.ElementNode {
+			// Look for h2/h3 elements containing links (typical story card pattern)
+			if node.Data == "h2" || node.Data == "h3" {
+				if link := findFirstLink(node); link != nil {
+					href := getAttr(link, "href")
+					// Only count if it's a substantial link (not just "#")
+					if href != "" && !strings.HasPrefix(href, "#") && len(textContent(link)) > 10 {
+						count++
+					}
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			countRecursive(c, depth+1)
+		}
+	}
+	countRecursive(n, 0)
+	return count
+}
+
+// extractArticleList extracts multiple articles as a structured list.
+func extractArticleList(n *html.Node, parent *Node) {
+	// Strategy 1: Story cards (heading+link patterns)
+	// This works better for sites like NYTimes where <article> containers hold multiple stories
+	list := &Node{Type: NodeList}
+	extractStoryCards(n, list)
+
+	// Strategy 2: If story cards didn't work well, try direct <article> children
+	if len(list.Children) < 3 {
+		list.Children = nil // Reset
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode && c.Data == "article" {
+				// Skip sponsored/ad articles
+				class := getAttr(c, "class")
+				if strings.Contains(class, "sponsored") || strings.Contains(class, "ad-") ||
+					strings.Contains(class, "promo") || strings.Contains(class, "advertisement") {
+					continue
+				}
+
+				data := extractArticleEntry(c)
+				if data.Title == "" {
+					continue // Skip articles without extractable title
+				}
+
+				item := articleDataToListItem(data)
+				list.Children = append(list.Children, item)
+			}
+		}
+	}
+
+	if len(list.Children) > 0 {
+		parent.Children = append(parent.Children, list)
+	}
+}
+
+// extractStoryCards finds story cards by looking for heading+link patterns.
+func extractStoryCards(n *html.Node, list *Node) {
+	var extract func(*html.Node, int)
+	extract = func(node *html.Node, depth int) {
+		if depth > 6 {
+			return // Don't go too deep
+		}
+
+		if node.Type == html.ElementNode {
+			// Skip sponsored/ad containers
+			if isAdContent(node) {
+				return
+			}
+
+			// When we find an h2/h3 with a link, extract it as a story card
+			if node.Data == "h2" || node.Data == "h3" {
+				// Also check if any ancestor is sponsored
+				if isInsideAdContent(node) {
+					return
+				}
+
+				if link := findFirstLink(node); link != nil {
+					href := getAttr(link, "href")
+					text := strings.TrimSpace(textContent(link))
+
+					// Only process substantial links
+					if href != "" && !strings.HasPrefix(href, "#") && len(text) > 10 {
+						data := articleData{
+							Title:     text,
+							TitleHref: href,
+							Source:    extractDomain(href),
+						}
+
+						// Look for description in next sibling <p>
+						data.Description = findSiblingDescription(node)
+
+						// Look for author/date in parent or siblings
+						data.Author, data.Date = findNearbyMetadata(node)
+
+						item := articleDataToListItem(data)
+						list.Children = append(list.Children, item)
+						return // Don't recurse into this heading
+					}
+				}
+			}
+		}
+
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			extract(c, depth+1)
+		}
+	}
+	extract(n, 0)
+}
+
+// isAdContent checks if a node looks like sponsored/ad content.
+func isAdContent(node *html.Node) bool {
+	class := strings.ToLower(getAttr(node, "class"))
+	return strings.Contains(class, "sponsored") || strings.Contains(class, "ad-") ||
+		strings.Contains(class, "promo") || strings.Contains(class, "advertisement")
+}
+
+// isInsideAdContent checks if any ancestor of a node is ad content.
+func isInsideAdContent(node *html.Node) bool {
+	for p := node.Parent; p != nil; p = p.Parent {
+		if p.Type == html.ElementNode && isAdContent(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsBlockContent checks if a node contains block-level elements.
+// Used to detect when an <a> wraps a whole card (heading + paragraph + metadata).
+func containsBlockContent(n *html.Node) bool {
+	blockTags := map[string]bool{
+		"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+		"p": true, "div": true, "section": true, "article": true,
+	}
+
+	var hasBlock func(*html.Node, int) bool
+	hasBlock = func(node *html.Node, depth int) bool {
+		if depth > 5 {
+			return false
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode {
+				if blockTags[c.Data] {
+					return true
+				}
+				if hasBlock(c, depth+1) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return hasBlock(n, 0)
+}
+
+// extractBlockLink extracts structured content from an <a> that wraps block content.
+// Applies the link to the title only, keeps description/metadata as plain text.
+func extractBlockLink(a *html.Node, href string, parent *Node) {
+	// Find the title: first heading or first substantial text
+	var title string
+	var description string
+	var metadata []string
+
+	var extract func(*html.Node, int)
+	extract = func(node *html.Node, depth int) {
+		if depth > 6 {
+			return
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type == html.ElementNode {
+				switch c.Data {
+				case "h1", "h2", "h3", "h4", "h5", "h6":
+					// Heading becomes the title
+					if title == "" {
+						title = strings.TrimSpace(textContent(c))
+					}
+				case "p":
+					// First substantial paragraph becomes description
+					text := strings.TrimSpace(textContent(c))
+					if description == "" && len(text) > 20 {
+						description = text
+					} else if len(text) > 0 && len(text) < 100 {
+						// Short text might be metadata
+						metadata = append(metadata, text)
+					}
+				case "span", "time":
+					// Likely metadata (time, category, etc.)
+					text := strings.TrimSpace(textContent(c))
+					if text != "" && len(text) < 100 {
+						metadata = append(metadata, text)
+					}
+				case "img", "picture", "figure", "svg":
+					// Skip images
+					continue
+				default:
+					// Recurse into other containers
+					extract(c, depth+1)
+				}
+			}
+		}
+	}
+	extract(a, 0)
+
+	// If no heading found, use first substantial text as title
+	if title == "" && description != "" {
+		title = description
+		description = ""
+	}
+
+	if title == "" {
+		// No extractable content, fall back to simple link
+		text := strings.TrimSpace(textContent(a))
+		if text != "" {
+			node := &Node{Type: NodeParagraph}
+			link := &Node{Type: NodeLink, Href: href}
+			link.Children = append(link.Children, &Node{Type: NodeText, Text: text})
+			node.Children = append(node.Children, link)
+			parent.Children = append(parent.Children, node)
+		}
+		return
+	}
+
+	// Build structured output: linked title + description + metadata
+	para := &Node{Type: NodeParagraph}
+
+	// Title as link
+	link := &Node{Type: NodeLink, Href: href}
+	link.Children = append(link.Children, &Node{Type: NodeText, Text: title})
+	para.Children = append(para.Children, link)
+
+	// Description as plain text (truncated)
+	if description != "" {
+		desc := truncateDescription(description, 120)
+		para.Children = append(para.Children, &Node{Type: NodeText, Text: "\n" + desc})
+	}
+
+	// Metadata as dimmed text
+	if len(metadata) > 0 {
+		// Filter out duplicates and very short items
+		seen := make(map[string]bool)
+		var filtered []string
+		for _, m := range metadata {
+			m = strings.TrimSpace(m)
+			if len(m) > 2 && !seen[m] && m != title {
+				seen[m] = true
+				filtered = append(filtered, m)
+			}
+		}
+		if len(filtered) > 0 {
+			// Limit metadata items
+			if len(filtered) > 3 {
+				filtered = filtered[:3]
+			}
+			para.Children = append(para.Children, &Node{Type: NodeText, Text: "\n" + strings.Join(filtered, " · ")})
+		}
+	}
+
+	parent.Children = append(parent.Children, para)
+}
+
+// findSiblingDescription looks for a <p> sibling after a heading.
+func findSiblingDescription(heading *html.Node) string {
+	// Look at next siblings for a <p>
+	for sib := heading.NextSibling; sib != nil; sib = sib.NextSibling {
+		if sib.Type == html.ElementNode {
+			if sib.Data == "p" {
+				text := strings.TrimSpace(textContent(sib))
+				if len(text) > 30 && !strings.HasPrefix(text, "By ") {
+					return truncateDescription(text, 100)
+				}
+			}
+			// Also check for description in divs or spans
+			if sib.Data == "div" || sib.Data == "span" {
+				text := strings.TrimSpace(textContent(sib))
+				if len(text) > 50 && len(text) < 300 && !strings.HasPrefix(text, "By ") {
+					return truncateDescription(text, 100)
+				}
+			}
+			// Stop if we hit another heading (next story card)
+			if sib.Data == "h2" || sib.Data == "h3" || sib.Data == "h4" {
+				break
+			}
+		}
+	}
+
+	// Also look in parent's next siblings (for nested structures)
+	if heading.Parent != nil {
+		for sib := heading.Parent.NextSibling; sib != nil; sib = sib.NextSibling {
+			if sib.Type == html.ElementNode && sib.Data == "p" {
+				text := strings.TrimSpace(textContent(sib))
+				if len(text) > 30 && !strings.HasPrefix(text, "By ") {
+					return truncateDescription(text, 100)
+				}
+			}
+			// Stop early
+			if sib.Type == html.ElementNode && (sib.Data == "h2" || sib.Data == "h3") {
+				break
+			}
+		}
+	}
+
+	return ""
+}
+
+// findNearbyMetadata looks for author/date near a heading.
+func findNearbyMetadata(heading *html.Node) (author, date string) {
+	// Check parent and siblings for metadata elements
+	searchArea := heading.Parent
+	if searchArea == nil {
+		return
+	}
+
+	// Look for time elements
+	var findMeta func(*html.Node, int) bool
+	findMeta = func(node *html.Node, depth int) bool {
+		if depth > 3 {
+			return false
+		}
+		if node.Type == html.ElementNode {
+			if node.Data == "time" && date == "" {
+				dt := getAttr(node, "datetime")
+				if dt != "" {
+					date = formatDate(dt)
+				} else {
+					date = strings.TrimSpace(textContent(node))
+				}
+			}
+			class := strings.ToLower(getAttr(node, "class"))
+			if (strings.Contains(class, "author") || strings.Contains(class, "byline")) && author == "" {
+				text := strings.TrimSpace(textContent(node))
+				text = strings.TrimPrefix(text, "By ")
+				text = strings.TrimPrefix(text, "by ")
+				if text != "" && len(text) < 100 {
+					author = text
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if findMeta(c, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+	findMeta(searchArea, 0)
+
+	return author, date
+}
+
+// extractArticleEntry extracts structured data from an article element.
+func extractArticleEntry(n *html.Node) articleData {
+	var data articleData
+
+	// Extract title: first h1/h2/h3 or prominent link
+	data.Title, data.TitleHref = findArticleTitle(n)
+
+	// Extract description: first substantial <p> that isn't metadata
+	data.Description = findArticleDescription(n)
+
+	// Extract author and date
+	data.Author, data.Date = findArticleMetadata(n)
+
+	// Extract source domain from title href
+	if data.TitleHref != "" {
+		data.Source = extractDomain(data.TitleHref)
+	}
+
+	return data
+}
+
+// findArticleTitle finds the title and link from an article.
+func findArticleTitle(n *html.Node) (title, href string) {
+	// First try h1, h2, h3 headings
+	var findHeading func(*html.Node) bool
+	findHeading = func(node *html.Node) bool {
+		if node.Type == html.ElementNode {
+			switch node.Data {
+			case "h1", "h2", "h3":
+				text := strings.TrimSpace(textContent(node))
+				if text != "" {
+					title = text
+					// Look for link inside the heading
+					if link := findFirstLink(node); link != nil {
+						href = getAttr(link, "href")
+					}
+					// Also check if parent is a link (common pattern: <a><h3>Title</h3></a>)
+					if href == "" && node.Parent != nil &&
+						node.Parent.Type == html.ElementNode && node.Parent.Data == "a" {
+						href = getAttr(node.Parent, "href")
+					}
+					return true
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if findHeading(c) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if findHeading(n) && title != "" {
+		return title, href
+	}
+
+	// Fallback: find first substantial link (>10 chars, likely title)
+	var findProminentLink func(*html.Node) bool
+	findProminentLink = func(node *html.Node) bool {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			text := strings.TrimSpace(textContent(node))
+			linkHref := getAttr(node, "href")
+			// Skip navigation-style links, look for title-like links
+			if len(text) > 10 && linkHref != "" && !strings.HasPrefix(linkHref, "#") {
+				title = text
+				href = linkHref
+				return true
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if findProminentLink(c) {
+				return true
+			}
+		}
+		return false
+	}
+
+	findProminentLink(n)
+	return title, href
+}
+
+// findFirstLink finds the first <a> element in a subtree.
+func findFirstLink(n *html.Node) *html.Node {
+	if n.Type == html.ElementNode && n.Data == "a" {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findFirstLink(c); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// findArticleDescription finds the first substantial paragraph.
+func findArticleDescription(n *html.Node) string {
+	var description string
+	var find func(*html.Node) bool
+	find = func(node *html.Node) bool {
+		if node.Type == html.ElementNode && node.Data == "p" {
+			text := strings.TrimSpace(textContent(node))
+			// Skip short text (likely metadata) or text starting with "By" (author line)
+			if len(text) > 50 && !strings.HasPrefix(text, "By ") && !strings.HasPrefix(text, "by ") {
+				description = truncateDescription(text, 100)
+				return true
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if find(c) {
+				return true
+			}
+		}
+		return false
+	}
+	find(n)
+	return description
+}
+
+// findArticleMetadata extracts author and date from an article.
+func findArticleMetadata(n *html.Node) (author, date string) {
+	// Look for <time> element for date
+	var findTime func(*html.Node) bool
+	findTime = func(node *html.Node) bool {
+		if node.Type == html.ElementNode && node.Data == "time" {
+			// Prefer datetime attribute, fallback to text content
+			dt := getAttr(node, "datetime")
+			if dt != "" {
+				date = formatDate(dt)
+			} else {
+				date = strings.TrimSpace(textContent(node))
+			}
+			return date != ""
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if findTime(c) {
+				return true
+			}
+		}
+		return false
+	}
+	findTime(n)
+
+	// Look for author: class containing "author" or "byline", or "By X" pattern
+	var findAuthor func(*html.Node) bool
+	findAuthor = func(node *html.Node) bool {
+		if node.Type == html.ElementNode {
+			class := strings.ToLower(getAttr(node, "class"))
+			rel := strings.ToLower(getAttr(node, "rel"))
+
+			// Check for author-related classes or rel attribute
+			if strings.Contains(class, "author") || strings.Contains(class, "byline") ||
+				strings.Contains(rel, "author") {
+				text := strings.TrimSpace(textContent(node))
+				// Clean up "By " prefix if present
+				text = strings.TrimPrefix(text, "By ")
+				text = strings.TrimPrefix(text, "by ")
+				if text != "" && len(text) < 100 { // Sanity check length
+					author = text
+					return true
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if findAuthor(c) {
+				return true
+			}
+		}
+		return false
+	}
+	findAuthor(n)
+
+	return author, date
+}
+
+// truncateDescription truncates text to maxLen chars with ellipsis.
+func truncateDescription(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	// Find last space before maxLen to avoid cutting words
+	truncated := s[:maxLen]
+	if idx := strings.LastIndex(truncated, " "); idx > maxLen/2 {
+		truncated = truncated[:idx]
+	}
+	return truncated + "..."
+}
+
+// formatDate formats a datetime string to a human-readable format.
+func formatDate(datetime string) string {
+	// Handle ISO format like "2025-12-10T10:30:00Z"
+	if len(datetime) >= 10 {
+		dateStr := datetime[:10]
+		parts := strings.Split(dateStr, "-")
+		if len(parts) == 3 {
+			months := []string{"", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+				"Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+			year := parts[0]
+			monthNum := 0
+			fmt.Sscanf(parts[1], "%d", &monthNum)
+			day := strings.TrimPrefix(parts[2], "0")
+			if monthNum >= 1 && monthNum <= 12 {
+				return months[monthNum] + " " + day + ", " + year
+			}
+		}
+	}
+	return datetime
+}
+
+// extractDomain extracts the domain name from a URL.
+func extractDomain(url string) string {
+	// Skip protocol
+	if idx := strings.Index(url, "://"); idx != -1 {
+		url = url[idx+3:]
+	}
+	// Get just the host
+	if idx := strings.Index(url, "/"); idx != -1 {
+		url = url[:idx]
+	}
+	// Remove www. prefix
+	url = strings.TrimPrefix(url, "www.")
+	return url
+}
+
+// articleDataToListItem converts articleData to a NodeListItem.
+func articleDataToListItem(data articleData) *Node {
+	item := &Node{Type: NodeListItem}
+
+	// Add title as link
+	if data.TitleHref != "" {
+		link := &Node{Type: NodeLink, Href: data.TitleHref}
+		link.Children = append(link.Children, &Node{Type: NodeText, Text: data.Title})
+		item.Children = append(item.Children, link)
+	} else {
+		item.Children = append(item.Children, &Node{Type: NodeStrong, Children: []*Node{
+			{Type: NodeText, Text: data.Title},
+		}})
+	}
+
+	// Add source domain if external link
+	if data.Source != "" {
+		item.Children = append(item.Children, &Node{Type: NodeText, Text: " (" + data.Source + ")"})
+	}
+
+	// Add description on new line
+	if data.Description != "" {
+		item.Children = append(item.Children, &Node{Type: NodeText, Text: "\n  " + data.Description})
+	}
+
+	// Add author and date on new line
+	var metaParts []string
+	if data.Author != "" {
+		metaParts = append(metaParts, data.Author)
+	}
+	if data.Date != "" {
+		metaParts = append(metaParts, data.Date)
+	}
+	if len(metaParts) > 0 {
+		item.Children = append(item.Children, &Node{Type: NodeText, Text: "\n  " + strings.Join(metaParts, " · ")})
+	}
+
+	return item
+}
+
 // extractNavigation walks the tree and extracts all navigation elements.
 func extractNavigation(n *html.Node, doc *Document) {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -638,6 +1296,13 @@ func extractNavigation(n *html.Node, doc *Document) {
 
 // extractContentOnly extracts content, skipping navigation elements.
 func extractContentOnly(n *html.Node, parent *Node) {
+	// Check if this node contains multiple articles (index page pattern)
+	// This handles the case when <main> or similar is the content root
+	if shouldExtractAsArticleList(n) {
+		extractArticleList(n, parent)
+		return
+	}
+
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		switch c.Type {
 		case html.ElementNode:
@@ -731,7 +1396,12 @@ func extractContentOnly(n *html.Node, parent *Node) {
 				if id := getAttr(c, "id"); id != "" {
 					parent.Children = append(parent.Children, &Node{Type: NodeAnchor, ID: id})
 				}
-				extractContentOnly(c, parent)
+				// Check for article list (multiple <article> children = index page)
+				if shouldExtractAsArticleList(c) {
+					extractArticleList(c, parent)
+				} else {
+					extractContentOnly(c, parent)
+				}
 
 			case "tr":
 				// Table row - extract cells as a single line
@@ -751,8 +1421,16 @@ func extractContentOnly(n *html.Node, parent *Node) {
 					parent.Children = append(parent.Children, &Node{Type: NodeAnchor, ID: anchorID})
 				}
 
-				// Standalone link (not inside a paragraph) - treat as a paragraph with a link
 				href := getAttr(c, "href")
+
+				// Check if this <a> wraps block content (common card pattern)
+				// If so, extract structured content with link on title only
+				if href != "" && containsBlockContent(c) {
+					extractBlockLink(c, href, parent)
+					continue
+				}
+
+				// Simple inline link - treat as a paragraph with a link
 				text := strings.TrimSpace(textContent(c))
 
 				// If no text, check for img alt text (for image links)
@@ -1314,11 +1992,112 @@ func getNavLabel(n *html.Node) string {
 func extractList(n *html.Node, parent *Node) {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type == html.ElementNode && c.Data == "li" {
+			// Strategy 1: Check if this li contains an article element
+			if article := findChildArticle(c); article != nil {
+				data := extractArticleEntry(article)
+				if data.Title != "" {
+					item := articleDataToListItem(data)
+					parent.Children = append(parent.Children, item)
+					continue
+				}
+			}
+
+			// Strategy 2: Check for news-card pattern (prominent link + description)
+			// Used by NYTimes in sections without <article> elements
+			if data := extractNewsCard(c); data.Title != "" {
+				item := articleDataToListItem(data)
+				parent.Children = append(parent.Children, item)
+				continue
+			}
+
+			// Standard extraction for regular list items
 			item := &Node{Type: NodeListItem}
 			extractInline(c, item)
 			parent.Children = append(parent.Children, item)
 		}
 	}
+}
+
+// extractNewsCard extracts structured data from a news card pattern.
+// This handles <li> elements that contain a prominent link + description
+// but no <article> element (e.g., NYTimes Personal Tech section).
+func extractNewsCard(li *html.Node) articleData {
+	var data articleData
+
+	// Find first substantial link (>20 chars) - this is the title
+	var findTitleLink func(*html.Node, int) bool
+	findTitleLink = func(node *html.Node, depth int) bool {
+		if depth > 5 {
+			return false
+		}
+		if node.Type == html.ElementNode && node.Data == "a" {
+			href := getAttr(node, "href")
+			text := strings.TrimSpace(textContent(node))
+			// Skip short links (navigation) and anchor links
+			if len(text) > 20 && href != "" && !strings.HasPrefix(href, "#") {
+				data.Title = text
+				data.TitleHref = href
+				data.Source = extractDomain(href)
+				return true
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			if findTitleLink(c, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !findTitleLink(li, 0) {
+		return data // No title found
+	}
+
+	// Find description: <p> element with >30 chars that's different from title
+	var findDescription func(*html.Node, int)
+	findDescription = func(node *html.Node, depth int) {
+		if depth > 5 || data.Description != "" {
+			return
+		}
+		if node.Type == html.ElementNode && node.Data == "p" {
+			text := strings.TrimSpace(textContent(node))
+			// Must be substantial and different from title
+			if len(text) > 30 && !strings.HasPrefix(text, "By ") && text != data.Title {
+				// Avoid picking up the title paragraph
+				if !strings.Contains(data.Title, text) && !strings.Contains(text, data.Title) {
+					data.Description = truncateDescription(text, 100)
+					return
+				}
+			}
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			findDescription(c, depth+1)
+		}
+	}
+	findDescription(li, 0)
+
+	// Find author/date metadata
+	data.Author, data.Date = findNearbyMetadata(li)
+
+	return data
+}
+
+// findChildArticle finds a child article element within a node (shallow search).
+func findChildArticle(n *html.Node) *html.Node {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode {
+			if c.Data == "article" {
+				return c
+			}
+			// Check one level deeper (for <li><div><article> patterns)
+			for gc := c.FirstChild; gc != nil; gc = gc.NextSibling {
+				if gc.Type == html.ElementNode && gc.Data == "article" {
+					return gc
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func extractInline(n *html.Node, parent *Node) {
@@ -1386,6 +2165,12 @@ func extractInline(n *html.Node, parent *Node) {
 			case "style", "script", "noscript", "template":
 				// Skip non-content elements
 				continue
+
+			case "ul", "ol":
+				// Nested list - extract properly with article detection
+				list := &Node{Type: NodeList}
+				extractList(c, list)
+				parent.Children = append(parent.Children, list)
 
 			default:
 				extractInline(c, parent)

@@ -896,6 +896,13 @@ func (r *Renderer) renderBlockquote(n *html.Node) {
 
 func (r *Renderer) renderList(n *html.Node) {
 	for _, item := range n.Children {
+		// Check if this item contains only a nested list (flatten nested lists)
+		if len(item.Children) == 1 && item.Children[0].Type == html.NodeList {
+			// Render nested list items directly (don't add extra bullet for container)
+			r.renderList(item.Children[0])
+			continue
+		}
+
 		// Build spans from list item (preserving links)
 		var spans []textSpan
 		r.extractSpansRecursive(item, render.Style{}, "", false, &spans)
