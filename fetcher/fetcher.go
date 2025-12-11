@@ -418,6 +418,25 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 			}
 			return nil
 		}),
+		// Check for DataDome and wait for it to complete
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var bodyHTML string
+			if err := chromedp.OuterHTML("body", &bodyHTML, chromedp.ByQuery).Do(ctx); err != nil {
+				return nil
+			}
+			// DataDome signature - wait longer for JS challenge to complete
+			if strings.Contains(bodyHTML, "captcha-delivery.com") ||
+				strings.Contains(bodyHTML, "Please enable JS") {
+				// Wait for DataDome to complete its check
+				chromedp.Sleep(5 * time.Second).Do(ctx)
+				// Check again - if still blocked, try waiting more
+				chromedp.OuterHTML("body", &bodyHTML, chromedp.ByQuery).Do(ctx)
+				if strings.Contains(bodyHTML, "captcha-delivery.com") {
+					chromedp.Sleep(5 * time.Second).Do(ctx)
+				}
+			}
+			return nil
+		}),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 	)
 	if err != nil {

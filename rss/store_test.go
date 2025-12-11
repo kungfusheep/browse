@@ -308,3 +308,40 @@ func TestGetUnreadItems(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkReadByLink(t *testing.T) {
+	store := &Store{
+		Items:     make(map[string][]FeedItem),
+		ReadGUIDs: make(map[string]time.Time),
+	}
+
+	store.Items["feed1"] = []FeedItem{
+		{GUID: "item-1", Title: "Item 1", Link: "https://example.com/article1"},
+		{GUID: "item-2", Title: "Item 2", Link: "https://example.com/article2"},
+		{GUID: "item-3", Title: "Item 3", Link: "https://example.com/article3"},
+	}
+
+	// Test marking by link URL
+	marked := store.MarkReadByLink("https://example.com/article2")
+	if !marked {
+		t.Error("expected MarkReadByLink to return true for existing link")
+	}
+
+	if !store.IsRead("item-2") {
+		t.Error("item-2 should be marked as read")
+	}
+
+	// Test that other items are not affected
+	if store.IsRead("item-1") {
+		t.Error("item-1 should not be marked as read")
+	}
+	if store.IsRead("item-3") {
+		t.Error("item-3 should not be marked as read")
+	}
+
+	// Test marking non-existent link
+	marked = store.MarkReadByLink("https://example.com/nonexistent")
+	if marked {
+		t.Error("expected MarkReadByLink to return false for non-existent link")
+	}
+}

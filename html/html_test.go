@@ -998,3 +998,79 @@ func TestListHasLinkFirstItems(t *testing.T) {
 		})
 	}
 }
+
+func TestDiscoverFeeds(t *testing.T) {
+	tests := []struct {
+		name     string
+		html     string
+		expected []FeedLink
+	}{
+		{
+			name:     "no feeds",
+			html:     `<html><head><title>Test</title></head><body>Content</body></html>`,
+			expected: nil,
+		},
+		{
+			name: "single RSS feed",
+			html: `<html><head>
+				<link rel="alternate" type="application/rss+xml" href="/feed.xml" title="RSS Feed">
+			</head><body>Content</body></html>`,
+			expected: []FeedLink{{URL: "/feed.xml", Title: "RSS Feed", Type: "rss"}},
+		},
+		{
+			name: "single Atom feed",
+			html: `<html><head>
+				<link rel="alternate" type="application/atom+xml" href="/atom.xml" title="Atom Feed">
+			</head><body>Content</body></html>`,
+			expected: []FeedLink{{URL: "/atom.xml", Title: "Atom Feed", Type: "atom"}},
+		},
+		{
+			name: "multiple feeds",
+			html: `<html><head>
+				<link rel="alternate" type="application/rss+xml" href="/rss.xml" title="RSS">
+				<link rel="alternate" type="application/atom+xml" href="/atom.xml" title="Atom">
+			</head><body>Content</body></html>`,
+			expected: []FeedLink{
+				{URL: "/rss.xml", Title: "RSS", Type: "rss"},
+				{URL: "/atom.xml", Title: "Atom", Type: "atom"},
+			},
+		},
+		{
+			name: "ignores non-feed links",
+			html: `<html><head>
+				<link rel="stylesheet" href="/style.css">
+				<link rel="alternate" type="application/rss+xml" href="/feed.xml">
+				<link rel="canonical" href="https://example.com">
+			</head><body>Content</body></html>`,
+			expected: []FeedLink{{URL: "/feed.xml", Title: "", Type: "rss"}},
+		},
+		{
+			name: "absolute URL",
+			html: `<html><head>
+				<link rel="alternate" type="application/rss+xml" href="https://example.com/feed.xml" title="Feed">
+			</head><body>Content</body></html>`,
+			expected: []FeedLink{{URL: "https://example.com/feed.xml", Title: "Feed", Type: "rss"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			feeds := DiscoverFeeds(tt.html)
+			if len(feeds) != len(tt.expected) {
+				t.Errorf("got %d feeds, expected %d", len(feeds), len(tt.expected))
+				return
+			}
+			for i, feed := range feeds {
+				if feed.URL != tt.expected[i].URL {
+					t.Errorf("feed[%d].URL = %q, expected %q", i, feed.URL, tt.expected[i].URL)
+				}
+				if feed.Title != tt.expected[i].Title {
+					t.Errorf("feed[%d].Title = %q, expected %q", i, feed.Title, tt.expected[i].Title)
+				}
+				if feed.Type != tt.expected[i].Type {
+					t.Errorf("feed[%d].Type = %q, expected %q", i, feed.Type, tt.expected[i].Type)
+				}
+			}
+		})
+	}
+}

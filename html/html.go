@@ -109,6 +109,69 @@ const (
 	NodeHR         // Horizontal rule/separator
 )
 
+// FeedLink represents a discovered RSS/Atom feed link.
+type FeedLink struct {
+	URL   string // Feed URL (may be relative)
+	Title string // Feed title (from title attribute)
+	Type  string // Feed type: "rss" or "atom"
+}
+
+// DiscoverFeeds finds RSS and Atom feed links in HTML.
+// It searches for <link rel="alternate" type="application/rss+xml"> and similar tags.
+func DiscoverFeeds(rawHTML string) []FeedLink {
+	doc, err := html.Parse(strings.NewReader(rawHTML))
+	if err != nil {
+		return nil
+	}
+
+	var feeds []FeedLink
+	var findFeeds func(*html.Node)
+	findFeeds = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "link" {
+			var rel, href, title, linkType string
+			for _, attr := range n.Attr {
+				switch attr.Key {
+				case "rel":
+					rel = strings.ToLower(attr.Val)
+				case "href":
+					href = attr.Val
+				case "title":
+					title = attr.Val
+				case "type":
+					linkType = strings.ToLower(attr.Val)
+				}
+			}
+
+			// Check for RSS or Atom feed links
+			if rel == "alternate" && href != "" {
+				var feedType string
+				switch linkType {
+				case "application/rss+xml":
+					feedType = "rss"
+				case "application/atom+xml":
+					feedType = "atom"
+				case "application/feed+json":
+					feedType = "json"
+				}
+				if feedType != "" {
+					feeds = append(feeds, FeedLink{
+						URL:   href,
+						Title: title,
+						Type:  feedType,
+					})
+				}
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			findFeeds(c)
+		}
+	}
+
+	findFeeds(doc)
+	return feeds
+}
+
 // Parse extracts article content from HTML, returning a Document with
 // main content and navigation elements separated.
 func Parse(r io.Reader) (*Document, error) {

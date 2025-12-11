@@ -94,6 +94,12 @@ type Keybindings struct {
 	AddFavourite   string `json:"addFavourite"`
 	FavouritesList string `json:"favouritesList"`
 
+	// RSS
+	RSSFeeds       string `json:"rssFeeds"`       // Open RSS feed list
+	RSSSubscribe   string `json:"rssSubscribe"`   // Subscribe to current page's feed
+	RSSUnsubscribe string `json:"rssUnsubscribe"` // Unsubscribe from feed (x like close)
+	RSSRefresh     string `json:"rssRefresh"`     // Refresh all feeds
+
 	// Omnibox (unified URL + search)
 	Omnibox string `json:"omnibox"`
 
@@ -182,6 +188,10 @@ func Default() *Config {
 			BufferList:         "`",
 			AddFavourite:       "M",
 			FavouritesList:     "'",
+			RSSFeeds:           "F",
+			RSSSubscribe:       "A",
+			RSSUnsubscribe:     "x",
+			RSSRefresh:         "gf",
 			Omnibox:            "\x0c", // Ctrl-l (browser-style address bar)
 			Home:               "H",
 			StructureInspector: "s",
@@ -344,6 +354,10 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.BufferList, user.Keybindings.BufferList)
 	mergeKeybinding(&result.Keybindings.AddFavourite, user.Keybindings.AddFavourite)
 	mergeKeybinding(&result.Keybindings.FavouritesList, user.Keybindings.FavouritesList)
+	mergeKeybinding(&result.Keybindings.RSSFeeds, user.Keybindings.RSSFeeds)
+	mergeKeybinding(&result.Keybindings.RSSSubscribe, user.Keybindings.RSSSubscribe)
+	mergeKeybinding(&result.Keybindings.RSSUnsubscribe, user.Keybindings.RSSUnsubscribe)
+	mergeKeybinding(&result.Keybindings.RSSRefresh, user.Keybindings.RSSRefresh)
 	mergeKeybinding(&result.Keybindings.Omnibox, user.Keybindings.Omnibox)
 	mergeKeybinding(&result.Keybindings.Home, user.Keybindings.Home)
 	mergeKeybinding(&result.Keybindings.StructureInspector, user.Keybindings.StructureInspector)

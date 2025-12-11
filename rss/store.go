@@ -266,6 +266,23 @@ func (s *Store) GetUnreadItems() []FeedItem {
 	return unread
 }
 
+// MarkReadByLink marks an item as read by its link URL.
+// Returns true if an item was found and marked, false otherwise.
+func (s *Store) MarkReadByLink(linkURL string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, items := range s.Items {
+		for _, item := range items {
+			if item.Link == linkURL {
+				s.ReadGUIDs[item.GUID] = time.Now()
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // UpdateFeed stores fetched items for a feed.
 func (s *Store) UpdateFeed(feedURL string, parsed *ParsedFeed, maxItems int) int {
 	s.mu.Lock()

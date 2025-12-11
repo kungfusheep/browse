@@ -27,6 +27,7 @@ import (
 	"browse/llm"
 	"browse/omnibox"
 	"browse/render"
+	"browse/rss"
 	"browse/rules"
 	"browse/search"
 	"browse/session"
@@ -187,6 +188,14 @@ func run(url string) error {
 	// Load favourites early so landing page can show them
 	favStore, _ := favourites.Load()
 
+	// Load RSS store for feed management
+	rssStore, _ := rss.Load()
+
+	// Start RSS background poller (30 minute default interval)
+	rssPoller := rss.NewPoller(rssStore, 30*time.Minute)
+	rssPoller.Start()
+	defer rssPoller.Stop()
+
 	// Set up terminal
 	width, height, err := render.TerminalSize()
 	if err != nil {
@@ -216,10 +225,10 @@ func run(url string) error {
 
 	// Set up AI rule generation
 	llmClient := llm.NewClient(
-		llm.NewClaudeCode(),      // Prefer Claude Code CLI (free for CC users)
-		llm.NewClaudeAPI(""),     // Fall back to API if available
+		llm.NewClaudeCode(),  // Prefer Claude Code CLI (free for CC users)
+		llm.NewClaudeAPI(""), // Fall back to API if available
 	)
-	ruleCache, _ := rules.NewCache("") // Uses ~/.config/browse/rules/
+	ruleCache, _ := rules.NewCache("")                 // Uses ~/.config/browse/rules/
 	ruleGeneratorV1 := rules.NewGenerator(llmClient)   // Legacy list-based rules
 	ruleGeneratorV2 := rules.NewGeneratorV2(llmClient) // New template-based rules
 
@@ -267,6 +276,8 @@ func run(url string) error {
 				pageURL := sb.Current.URL
 				if pageURL == "browse://home" {
 					pageDoc, _ = landingPage(favStore)
+				} else if strings.HasPrefix(pageURL, "rss://") {
+					pageDoc, _ = handleRSSURL(rssStore, pageURL)
 				} else {
 					pageDoc, _ = fetchAndParse(pageURL)
 				}
@@ -354,35 +365,35 @@ func run(url string) error {
 	}
 
 	jumpMode := false
-	inputMode := false       // selecting an input field
-	textEntry := false       // entering text into a field
-	tocMode := false         // showing table of contents
-	navMode := false         // showing navigation overlay
-	navScrollOffset := 0     // scroll position within nav overlay
-	linkIndexMode := false   // showing link index overlay
-	linkScrollOffset := 0    // scroll position within link index
-	bufferMode := false      // showing buffer list overlay
-	bufferScrollOffset := 0  // scroll position within buffer list
-	urlMode := false         // entering a URL
-	omniMode := false        // omnibox mode (unified URL + search)
-	findMode := false                  // find in page mode
-	findInput := ""                    // current find query
-	findMatches := []document.Match{}  // match positions (from simple doc walker)
-	findCurrentIdx := 0                // current match index
-	loading := false         // currently loading a page
-	structureMode := false   // showing DOM structure inspector
+	inputMode := false                // selecting an input field
+	textEntry := false                // entering text into a field
+	tocMode := false                  // showing table of contents
+	navMode := false                  // showing navigation overlay
+	navScrollOffset := 0              // scroll position within nav overlay
+	linkIndexMode := false            // showing link index overlay
+	linkScrollOffset := 0             // scroll position within link index
+	bufferMode := false               // showing buffer list overlay
+	bufferScrollOffset := 0           // scroll position within buffer list
+	urlMode := false                  // entering a URL
+	omniMode := false                 // omnibox mode (unified URL + search)
+	findMode := false                 // find in page mode
+	findInput := ""                   // current find query
+	findMatches := []document.Match{} // match positions (from simple doc walker)
+	findCurrentIdx := 0               // current match index
+	loading := false                  // currently loading a page
+	structureMode := false            // showing DOM structure inspector
 	jumpInput := ""
-	defineMode := false              // word definition lookup mode
-	defineFilter := ""               // word prefix filter (what user is typing)
-	defineAllWords := []render.Word{}   // all word occurrences (with positions)
-	defineUniqueWords := []string{}     // unique matching word texts (for labels)
+	defineMode := false                               // word definition lookup mode
+	defineFilter := ""                                // word prefix filter (what user is typing)
+	defineAllWords := []render.Word{}                 // all word occurrences (with positions)
+	defineUniqueWords := []string{}                   // unique matching word texts (for labels)
 	defineWordPositions := map[string][]render.Word{} // word text -> all its positions
-	gPending := false // waiting for second key after 'g'
+	gPending := false                                 // waiting for second key after 'g'
 
 	// Focus mode state - dims non-focused paragraphs for easier reading
-	focusModeActive := false     // is focus mode currently active?
-	focusParagraphStart := 0     // Y start of focused paragraph
-	focusParagraphEnd := 0       // Y end of focused paragraph (start of next, or content end)
+	focusModeActive := false // is focus mode currently active?
+	focusParagraphStart := 0 // Y start of focused paragraph
+	focusParagraphEnd := 0   // Y end of focused paragraph (start of next, or content end)
 
 	// Key matching helpers for configurable bindings
 	key := func(input byte, binding string) bool {
@@ -395,24 +406,24 @@ func run(url string) error {
 	kb := cfg.Keybindings // shorthand for keybindings
 
 	var labels []string
-	var navLinks []document.NavLink             // current navigation links in overlay
-	var activeInput *document.Input             // currently selected input
-	var enteredText string                      // text being entered
-	var urlInput string                         // URL being entered
-	var omniInput string                        // omnibox input being entered
-	var structureViewer *inspector.Viewer       // DOM structure viewer
-	chatEditor := lineedit.New()                         // chat input editor (for ai:// pages)
-	var chatScheme lineedit.KeyScheme                    // keybinding scheme (from config)
+	var navLinks []document.NavLink       // current navigation links in overlay
+	var activeInput *document.Input       // currently selected input
+	var enteredText string                // text being entered
+	var urlInput string                   // URL being entered
+	var omniInput string                  // omnibox input being entered
+	var structureViewer *inspector.Viewer // DOM structure viewer
+	chatEditor := lineedit.New()          // chat input editor (for ai:// pages)
+	var chatScheme lineedit.KeyScheme     // keybinding scheme (from config)
 	if cfg.Editor.Scheme == "vim" {
 		chatScheme = lineedit.NewVimScheme()
 	} else {
 		chatScheme = lineedit.NewEmacsScheme()
 	}
-	omniParser := omnibox.NewParser()     // omnibox input parser
+	omniParser := omnibox.NewParser() // omnibox input parser
 
 	// Favourites mode state (favStore loaded at start of run())
-	favouritesMode := false      // showing favourites overlay
-	favouritesScrollOffset := 0  // scroll position within favourites
+	favouritesMode := false       // showing favourites overlay
+	favouritesScrollOffset := 0   // scroll position within favourites
 	favouritesDeleteMode := false // waiting for label to delete
 
 	// Theme picker state
@@ -1395,6 +1406,23 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 							go openImageGallery(allImageURLs, startIndex)
 							redraw()
 							break
+						}
+
+						// Check if this is an RSS URL
+						if strings.HasPrefix(newURL, "rss://") {
+							rssDoc, err := handleRSSURL(rssStore, newURL)
+							if err == nil {
+								navigateTo(newURL, rssDoc, "")
+							}
+							redraw()
+							break
+						}
+
+						// Mark RSS item as read when navigating from RSS page to article
+						if strings.HasPrefix(url, "rss://") && rssStore != nil {
+							if rssStore.MarkReadByLink(newURL) {
+								rssStore.Save()
+							}
 						}
 
 						// Check if this is a same-page anchor link
@@ -2652,7 +2680,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 		case keyG(buf[0], kb.Refresh): // gr - refresh current page
 			gPending = false
-			if url != "" && url != "browse://home" && !strings.HasPrefix(url, "dict://") {
+			if url != "" && url != "browse://home" && !strings.HasPrefix(url, "dict://") && !strings.HasPrefix(url, "rss://") {
 				go func(targetURL string) {
 					loading = true
 					redraw()
@@ -2676,6 +2704,18 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					}
 					redraw()
 				}(url)
+			}
+
+		case keyG(buf[0], kb.RSSRefresh): // gf - refresh all RSS feeds
+			gPending = false
+			if rssPoller != nil {
+				canvas.Clear()
+				canvas.WriteString(width/2-12, height/2, "Refreshing feeds...", render.Style{Bold: true})
+				renderToScreen()
+				rssPoller.RefreshNow()
+				// Brief confirmation (actual refresh happens in background)
+				time.Sleep(300 * time.Millisecond)
+				redraw()
 			}
 
 		case key(buf[0], kb.TableOfContents): // t - table of contents
@@ -2806,6 +2846,144 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					time.Sleep(300 * time.Millisecond)
 				}
 				redraw()
+			}
+
+		case key(buf[0], kb.RSSFeeds): // F - open RSS feed list
+			rssDoc, err := rssPage(rssStore)
+			if err == nil {
+				navigateTo("rss://", rssDoc, "")
+				redraw()
+			}
+
+		case key(buf[0], kb.RSSSubscribe): // A - subscribe to current page's feed
+			if currentHTML != "" && rssStore != nil {
+				feeds := html.DiscoverFeeds(currentHTML)
+				if len(feeds) == 0 {
+					canvas.Clear()
+					canvas.WriteString(width/2-10, height/2, "No RSS feed found", render.Style{Dim: true})
+					renderToScreen()
+					time.Sleep(500 * time.Millisecond)
+					redraw()
+				} else {
+					// Use first feed found (could add picker for multiple)
+					feed := feeds[0]
+					feedURL := resolveURL(url, feed.URL)
+
+					// Check if already subscribed
+					alreadySubscribed := false
+					for _, f := range rssStore.Feeds {
+						if f.URL == feedURL {
+							alreadySubscribed = true
+							break
+						}
+					}
+
+					if alreadySubscribed {
+						canvas.Clear()
+						canvas.WriteString(width/2-12, height/2, "Already subscribed", render.Style{Dim: true})
+						renderToScreen()
+						time.Sleep(500 * time.Millisecond)
+						redraw()
+					} else {
+						// Subscribe and fetch
+						canvas.Clear()
+						canvas.WriteString(width/2-10, height/2, "Subscribing...", render.Style{Bold: true})
+						renderToScreen()
+
+						go func(feedURL, feedTitle string) {
+							showError := func(msg string) {
+								canvas.Clear()
+								canvas.WriteString((width-len(msg))/2, height/2, msg, render.Style{Dim: true})
+								renderToScreen()
+								time.Sleep(800 * time.Millisecond)
+								redraw()
+							}
+
+							// Add subscription
+							rssStore.Subscribe(feedURL)
+
+							// Fetch feed content with timeout
+							client := &http.Client{Timeout: 15 * time.Second}
+							resp, err := client.Get(feedURL)
+							if err != nil {
+								rssStore.SetFeedError(feedURL, err.Error())
+								rssStore.Save()
+								showError("Error fetching feed")
+								return
+							}
+							defer resp.Body.Close()
+
+							data, err := io.ReadAll(resp.Body)
+							if err != nil {
+								rssStore.SetFeedError(feedURL, err.Error())
+								rssStore.Save()
+								showError("Error reading feed")
+								return
+							}
+
+							parsed, err := rss.Parse(data)
+							if err != nil {
+								rssStore.SetFeedError(feedURL, err.Error())
+								rssStore.Save()
+								showError("Error parsing feed")
+								return
+							}
+
+							// Update feed metadata and items
+							for i := range rssStore.Feeds {
+								if rssStore.Feeds[i].URL == feedURL {
+									if parsed.Title != "" {
+										rssStore.Feeds[i].Title = parsed.Title
+									} else if feedTitle != "" {
+										rssStore.Feeds[i].Title = feedTitle
+									}
+									if parsed.Description != "" {
+										rssStore.Feeds[i].Description = parsed.Description
+									}
+									if parsed.Link != "" {
+										rssStore.Feeds[i].SiteURL = parsed.Link
+									}
+									break
+								}
+							}
+
+							rssStore.UpdateFeed(feedURL, parsed, 100)
+							rssStore.Save()
+
+							// Show confirmation
+							canvas.Clear()
+							msg := fmt.Sprintf("Subscribed to %s (%d items)", parsed.Title, len(parsed.Items))
+							if len(msg) > width-4 {
+								msg = msg[:width-7] + "..."
+							}
+							canvas.WriteString((width-len(msg))/2, height/2, msg, render.Style{Bold: true})
+							renderToScreen()
+							time.Sleep(800 * time.Millisecond)
+							redraw()
+						}(feedURL, feed.Title)
+					}
+				}
+			}
+
+		case key(buf[0], kb.RSSUnsubscribe): // x - unsubscribe from feed
+			if rssStore != nil && strings.HasPrefix(url, "rss://feed/") {
+				// On a single feed page - remove this feed
+				encoded := strings.TrimPrefix(url, "rss://feed/")
+				decoded, err := neturl.PathUnescape(encoded)
+				if err == nil && decoded != "" {
+					if rssStore.Unsubscribe(decoded) {
+						rssStore.Save()
+						// Show confirmation and go back to feed list
+						canvas.Clear()
+						canvas.WriteString(width/2-8, height/2, "Unsubscribed!", render.Style{Bold: true})
+						renderToScreen()
+						time.Sleep(500 * time.Millisecond)
+						// Navigate back to RSS feed list
+						rssDoc, _ := handleRSSURL(rssStore, "rss://")
+						navigateTo("rss://", rssDoc, "")
+						redraw()
+					}
+				}
 			}
 
 		case key(buf[0], kb.NewBuffer) && !gPending: // T - open new buffer (duplicate current page)
@@ -3843,6 +4021,18 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 
 	htmlContent := string(body)
 
+	// Detect bot protection pages (DataDome, etc.) and retry with browser
+	if isBotProtectionPage(htmlContent) {
+		// Try browser fetch to bypass protection
+		result, browserErr := fetcher.WithBrowser(targetURL)
+		if browserErr == nil && result != nil && !isBotProtectionPage(result.HTML) {
+			htmlContent = result.HTML
+		} else {
+			// Browser fetch also failed - return a helpful message
+			return createBotProtectionDoc(targetURL), htmlContent, nil
+		}
+	}
+
 	// Check for site-specific handlers (HN, etc.) - they register via init()
 	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
 		if doc.ThemeColor == "" {
@@ -3876,6 +4066,64 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 	}
 
 	return defaultDoc, htmlContent, nil
+}
+
+// createBotProtectionDoc creates a document explaining the bot protection issue.
+func createBotProtectionDoc(targetURL string) *html.Document {
+	// Extract domain for RSS suggestion
+	u, _ := neturl.Parse(targetURL)
+	domain := ""
+	if u != nil {
+		domain = u.Host
+	}
+
+	htmlContent := fmt.Sprintf(`<html><body>
+<h1>Bot Protection Detected</h1>
+<p>This site (%s) has aggressive bot protection that prevents automated access.</p>
+
+<h2>Options</h2>
+<ul>
+<li><strong>Press 'o'</strong> to open in your default browser</li>
+<li><strong>Subscribe via RSS</strong> - Press 'F' then 'A' on a page with RSS feeds</li>
+<li><strong>Try again later</strong> - Sometimes protection passes after cookies are set</li>
+</ul>
+
+<h2>Why This Happens</h2>
+<p>Many news sites use DataDome or similar services to block automated access.
+These services use JavaScript fingerprinting that's difficult to bypass even with browser emulation.</p>
+</body></html>`, domain)
+
+	doc, _ := html.ParseString(htmlContent)
+	return doc
+}
+
+// isBotProtectionPage detects bot protection/captcha pages that need browser rendering.
+// Checks for DataDome, Cloudflare, and other common bot protection signatures.
+func isBotProtectionPage(htmlContent string) bool {
+	// Page must be small (protection pages are typically minimal)
+	if len(htmlContent) > 50000 {
+		return false
+	}
+
+	// DataDome signature
+	if strings.Contains(htmlContent, "captcha-delivery.com") ||
+		strings.Contains(htmlContent, "Please enable JS and disable any ad blocker") {
+		return true
+	}
+
+	// Cloudflare challenge
+	if strings.Contains(htmlContent, "cf-browser-verification") ||
+		strings.Contains(htmlContent, "Checking your browser") {
+		return true
+	}
+
+	// Generic bot detection patterns
+	if strings.Contains(htmlContent, "bot-check") ||
+		strings.Contains(htmlContent, "human-verification") {
+		return true
+	}
+
+	return false
 }
 
 // isRulesDocBetter checks if the rules-based document is actually better than default.
@@ -3982,8 +4230,10 @@ func resolveURL(base, href string) string {
 		return base + href
 	}
 
-	// Handle absolute URLs
-	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
+	// Handle absolute URLs (including internal schemes)
+	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") ||
+		strings.HasPrefix(href, "rss://") || strings.HasPrefix(href, "browse://") ||
+		strings.HasPrefix(href, "dict://") || strings.HasPrefix(href, "hn://") {
 		return href
 	}
 
@@ -4011,11 +4261,24 @@ func resolveURL(base, href string) string {
 	}
 
 	// Handle relative URLs
-	lastSlash := strings.LastIndex(base, "/")
+	// Find the path portion (after scheme://host)
+	idx := strings.Index(base, "://")
+	if idx == -1 {
+		return base + "/" + href
+	}
+	rest := base[idx+3:] // Everything after ://
+	slashIdx := strings.Index(rest, "/")
+	if slashIdx == -1 {
+		// No path - just host (e.g., https://example.com)
+		return base + "/" + href
+	}
+	// Find last slash in the path portion
+	pathStart := idx + 3 + slashIdx
+	lastSlash := strings.LastIndex(base[pathStart:], "/")
 	if lastSlash == -1 {
 		return base + "/" + href
 	}
-	return base[:lastSlash+1] + href
+	return base[:pathStart+lastSlash+1] + href
 }
 
 // urlWithoutHash returns the URL with any hash/fragment removed.
@@ -4144,6 +4407,7 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <tr><td><strong>&#96;</strong></td><td>Buffer list</td></tr>
 <tr><td><strong>M</strong></td><td>Add to favourites</td></tr>
 <tr><td><strong>'</strong></td><td>Favourites list</td></tr>
+<tr><td><strong>F</strong></td><td>RSS feeds</td></tr>
 <tr><td><strong>H</strong></td><td>Home</td></tr>
 <tr><td><strong>w</strong></td><td>Toggle wide mode</td></tr>
 <tr><td><strong>i</strong></td><td>Focus input field</td></tr>
@@ -4207,6 +4471,221 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 </html>`
 
 	return html.ParseString(page)
+}
+
+func rssPage(rssStore *rss.Store) (*html.Document, error) {
+	var feedsSection string
+	if rssStore != nil && len(rssStore.Feeds) > 0 {
+		feedsSection = "\n<h2>Subscribed Feeds</h2>\n<ul>\n"
+		for _, feed := range rssStore.Feeds {
+			// Escape HTML in title
+			title := feed.Title
+			if title == "" {
+				title = feed.URL
+			}
+			title = strings.ReplaceAll(title, "&", "&amp;")
+			title = strings.ReplaceAll(title, "<", "&lt;")
+			title = strings.ReplaceAll(title, ">", "&gt;")
+			title = strings.ReplaceAll(title, "\"", "&quot;")
+
+			// Build feed URL for navigation
+			feedURL := "rss://feed/" + neturl.PathEscape(feed.URL)
+
+			// Get unread count
+			unread := rssStore.UnreadCount(feed.URL)
+			unreadStr := ""
+			if unread > 0 {
+				unreadStr = fmt.Sprintf(" <strong>(%d unread)</strong>", unread)
+			}
+
+			// Last fetch info
+			lastFetch := ""
+			if !feed.LastFetch.IsZero() {
+				ago := time.Since(feed.LastFetch)
+				if ago < time.Minute {
+					lastFetch = " - updated just now"
+				} else if ago < time.Hour {
+					lastFetch = fmt.Sprintf(" - updated %d minutes ago", int(ago.Minutes()))
+				} else if ago < 24*time.Hour {
+					lastFetch = fmt.Sprintf(" - updated %d hours ago", int(ago.Hours()))
+				} else {
+					lastFetch = fmt.Sprintf(" - updated %s", feed.LastFetch.Format("Jan 2"))
+				}
+			}
+
+			// Error indicator
+			if feed.FetchError != "" {
+				lastFetch = " - <em>error fetching</em>"
+			}
+
+			feedsSection += fmt.Sprintf("<li><a href=\"%s\">%s</a>%s%s</li>\n",
+				feedURL, title, unreadStr, lastFetch)
+		}
+		feedsSection += "</ul>\n"
+	} else {
+		feedsSection = "\n<p><em>No subscribed feeds yet. Use 'A' on any page to subscribe to its RSS feed.</em></p>\n"
+	}
+
+	// Total unread count
+	totalUnread := 0
+	if rssStore != nil {
+		totalUnread = rssStore.AllUnreadCount()
+	}
+	unreadHeader := ""
+	if totalUnread > 0 {
+		unreadHeader = fmt.Sprintf("<p><strong>%d unread items</strong> - <a href=\"rss://unread\">View all unread</a></p>\n", totalUnread)
+	}
+
+	page := `<!DOCTYPE html>
+<html>
+<head><title>RSS Feeds</title></head>
+<body>
+<article>
+<h1>RSS Feeds</h1>
+` + unreadHeader + `
+<p><a href="rss://all">View all items</a></p>
+` + feedsSection + `
+<h2>Keybindings</h2>
+<table>
+<tr><th>Key</th><th>Action</th></tr>
+<tr><td><strong>F</strong></td><td>Open RSS feed list (this page)</td></tr>
+<tr><td><strong>A</strong></td><td>Subscribe to current page's feed</td></tr>
+<tr><td><strong>x</strong></td><td>Unsubscribe (when viewing a feed)</td></tr>
+<tr><td><strong>gf</strong></td><td>Refresh all feeds</td></tr>
+</table>
+
+<h2>Navigation</h2>
+<ul>
+<li><a href="rss://all">All items</a> - All items from all feeds</li>
+<li><a href="rss://unread">Unread items</a> - Only unread items</li>
+</ul>
+</article>
+</body>
+</html>`
+
+	return html.ParseString(page)
+}
+
+// rssItemsPage renders a list of RSS items (for rss://all, rss://unread, or rss://feed/<url>)
+func rssItemsPage(rssStore *rss.Store, feedURL string, unreadOnly bool, title string) (*html.Document, error) {
+	var items []rss.FeedItem
+	if feedURL != "" {
+		items = rssStore.GetItems(feedURL)
+	} else if unreadOnly {
+		items = rssStore.GetUnreadItems()
+	} else {
+		items = rssStore.GetAllItems()
+	}
+
+	var itemsSection string
+	if len(items) > 0 {
+		itemsSection = "<ul>\n"
+		for _, item := range items {
+			// Escape HTML
+			itemTitle := item.Title
+			if itemTitle == "" {
+				itemTitle = item.Link
+			}
+			itemTitle = strings.ReplaceAll(itemTitle, "&", "&amp;")
+			itemTitle = strings.ReplaceAll(itemTitle, "<", "&lt;")
+			itemTitle = strings.ReplaceAll(itemTitle, ">", "&gt;")
+
+			// Truncate description
+			desc := item.Description
+			if len(desc) > 150 {
+				desc = desc[:147] + "..."
+			}
+			desc = strings.ReplaceAll(desc, "&", "&amp;")
+			desc = strings.ReplaceAll(desc, "<", "&lt;")
+			desc = strings.ReplaceAll(desc, ">", "&gt;")
+
+			// Read marker
+			readMarker := ""
+			if rssStore.IsRead(item.GUID) {
+				readMarker = " <em>(read)</em>"
+			}
+
+			// Date and author
+			meta := ""
+			if !item.Published.IsZero() {
+				meta = item.Published.Format("Jan 2, 2006")
+			}
+			if item.Author != "" {
+				if meta != "" {
+					meta += " · "
+				}
+				meta += item.Author
+			}
+			if meta != "" {
+				meta = "<br/><small>" + meta + "</small>"
+			}
+
+			itemsSection += fmt.Sprintf("<li><a href=\"%s\">%s</a>%s%s<br/><small>%s</small></li>\n",
+				item.Link, itemTitle, readMarker, meta, desc)
+		}
+		itemsSection += "</ul>\n"
+	} else {
+		itemsSection = "<p><em>No items found.</em></p>\n"
+	}
+
+	page := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>%s</title></head>
+<body>
+<article>
+<h1>%s</h1>
+<p><a href="rss://">← Back to feed list</a></p>
+%s
+</article>
+</body>
+</html>`, title, title, itemsSection)
+
+	return html.ParseString(page)
+}
+
+// handleRSSURL routes rss:// URLs to the appropriate page handler
+func handleRSSURL(rssStore *rss.Store, rssURL string) (*html.Document, error) {
+	// Strip the rss:// prefix
+	path := strings.TrimPrefix(rssURL, "rss://")
+
+	switch {
+	case path == "" || path == "/":
+		// Main RSS feed list
+		return rssPage(rssStore)
+
+	case path == "all":
+		// All items from all feeds
+		return rssItemsPage(rssStore, "", false, "All RSS Items")
+
+	case path == "unread":
+		// Unread items only
+		return rssItemsPage(rssStore, "", true, "Unread RSS Items")
+
+	case strings.HasPrefix(path, "feed/"):
+		// Specific feed items: rss://feed/<encoded-url>
+		encodedURL := strings.TrimPrefix(path, "feed/")
+		feedURL, err := neturl.PathUnescape(encodedURL)
+		if err != nil {
+			feedURL = encodedURL
+		}
+		// Find feed title
+		title := feedURL
+		if rssStore != nil {
+			for _, f := range rssStore.Feeds {
+				if f.URL == feedURL {
+					if f.Title != "" {
+						title = f.Title
+					}
+					break
+				}
+			}
+		}
+		return rssItemsPage(rssStore, feedURL, false, title)
+
+	default:
+		// Unknown RSS path - show main page
+		return rssPage(rssStore)
+	}
 }
 
 // ErrCancelled is returned when an operation is cancelled by the user.
@@ -4538,7 +5017,6 @@ func openImagePreview(imageURL string) error {
 	return nil
 }
 
-
 // generateAISummary uses the LLM to generate a summary of page content.
 // Returns the summary HTML and a session ID for conversation continuity.
 func generateAISummary(llmClient *llm.Client, canvas *render.Canvas, pageContent, prompt string) (string, string) {
@@ -4677,3 +5155,48 @@ func generateDictHTML(word string, entries []dict.Entry) string {
 	b.WriteString(`</article></body></html>`)
 	return b.String()
 }
+
+// type PaymentRequest struct {
+// 	IK string
+// 	Amount   float64
+// 	Currency string
+// 	Source   string // e.g., credit card info
+// 	Target   string // e.g., merchant account
+// }
+//
+// type PaymentResponse struct {
+// 	TransactionID string
+// 	Status        string // e.g., "success", "failed"
+// 	Message       string // additional info
+// }
+//
+// type IdempotencyStore interface {
+// 	Get(key string) (*IdempotencyRecord, error)
+// 	Set(key string, record *IdempotencyRecord) error
+// }
+//
+// type IdempotencyRecord struct {
+// 	Key       string
+// 	Status    string // "pending", "completed", "failed"
+// 	Request   []byte
+// 	Response  []byte
+// 	Error     string
+// 	CreatedAt time.Time
+// }
+//
+// var store IdempotencyStore // Assume this is initialized elsewhere
+//
+// // This is what we're protecting
+// func processPayment(req PaymentRequest) (PaymentResponse, error) {
+// 	_ = req
+// 	// talks to banks, moves money, scary stuff
+//
+// 	// check for idem key in store
+// 	// if no match for key, store a pending record atomically
+// 	//
+//
+//
+// 	return PaymentResponse{TransactionID: "1234567890", Status: "success", Message: "Payment processed successfully"}, nil
+// }
+//
+// var _ = processPayment
