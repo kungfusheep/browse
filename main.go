@@ -62,7 +62,7 @@ func main() {
 
 	// Generate default config and exit
 	if initConfig {
-		fmt.Print(config.DefaultPkl())
+		fmt.Print(config.DefaultTOML())
 		return
 	}
 
@@ -87,18 +87,18 @@ Usage: browse [options] [url]
 
 Options:
   -p, --print       Print page to stdout (one-shot mode)
-  --init-config     Output default config (redirect to ~/.config/browse/config.pkl)
+  --init-config     Output default config (redirect to ~/.config/browse/config.toml)
   -h, --help        Show this help
 
 Examples:
   browse                          Open landing page
   browse https://example.com      Open URL
   browse -p https://example.com   Print page to stdout
-  browse --init-config > ~/.config/browse/config.pkl
+  browse --init-config > ~/.config/browse/config.toml
 
 Configuration:
-  Config file: ~/.config/browse/config.pkl
-  Generate with: browse --init-config > ~/.config/browse/config.pkl`)
+  Config file: ~/.config/browse/config.toml
+  Generate with: browse --init-config > ~/.config/browse/config.toml`)
 }
 
 func runPrint(url string) error {
@@ -697,6 +697,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		// Set find highlighting and render
 		renderer.SetFindQuery(findInput, findCurrentIdx)
 		renderer.SetFocusMode(focusModeActive, focusParagraphStart, focusParagraphEnd)
+		renderer.SetCurrentDomain(getDomain(url))
 		renderer.Render(doc, scrollY)
 
 		// Apply focus mode dimming if active
@@ -3490,7 +3491,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			// Create config file with defaults if it doesn't exist
 			if _, err := os.Stat(configPath); os.IsNotExist(err) {
 				os.MkdirAll(filepath.Dir(configPath), 0755)
-				os.WriteFile(configPath, []byte(config.DefaultPkl()), 0644)
+				os.WriteFile(configPath, []byte(config.DefaultTOML()), 0644)
 			}
 
 			// Restore terminal for editor
@@ -4382,6 +4383,15 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <article>
 <h1>Browse</h1>
 <p>A terminal-based web browser for reading the web in beautiful monospace.</p>
+
+<h2>Link Compatibility</h2>
+<p>Links are marked with compatibility indicators based on how well the site renders in a text browser:</p>
+<ul>
+<li><strong>★</strong> Excellent compatibility - clean HTML structure, works great here</li>
+<li><strong>✓</strong> Good compatibility - renders well in text mode</li>
+<li><em>No marker</em> - Unknown or not yet evaluated</li>
+</ul>
+<p>These markers indicate text-browser compatibility, not content quality. A site without a marker may still work well - we just haven't checked it yet.</p>
 
 <h2>Keybindings</h2>
 <table>

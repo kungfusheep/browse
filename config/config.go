@@ -1,19 +1,13 @@
-// Package config provides configuration loading for Browse using Pkl.
+// Package config provides configuration loading for Browse using TOML.
 package config
 
 import (
-	"context"
-	_ "embed"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/apple/pkl-go/pkl"
+	"github.com/BurntSushi/toml"
 )
-
-//go:embed Config.pkl
-var defaultSchema string
 
 // Display settings
 type Display struct {
@@ -224,7 +218,7 @@ func ConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "config.pkl"), nil
+	return filepath.Join(dir, "config.toml"), nil
 }
 
 // Load loads configuration, layering user config on top of defaults.
@@ -242,8 +236,8 @@ func Load() (*Config, error) {
 		return cfg, nil // Return defaults if no user config
 	}
 
-	// Load and evaluate user config with Pkl
-	userCfg, err := loadFromPkl(configPath)
+	// Load user config with TOML
+	userCfg, err := loadFromTOML(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading config from %s: %w", configPath, err)
 	}
@@ -252,36 +246,12 @@ func Load() (*Config, error) {
 	return merge(cfg, userCfg), nil
 }
 
-// loadFromPkl evaluates a Pkl config file and returns the config.
-func loadFromPkl(path string) (*Config, error) {
-	evaluator, err := pkl.NewEvaluator(context.Background(), pkl.PreconfiguredOptions)
-	if err != nil {
-		return nil, fmt.Errorf("creating pkl evaluator: %w", err)
-	}
-	defer evaluator.Close()
-
-	// Evaluate to JSON format - works with untyped Pkl objects
-	jsonBytes, err := evaluator.EvaluateExpressionRaw(context.Background(), pkl.FileSource(path), "new JsonRenderer {}.renderValue(this)")
-	if err != nil {
-		return nil, err
-	}
-
-	// Pkl may include prefix bytes before the JSON - find the opening brace
-	jsonStr := string(jsonBytes)
-	start := 0
-	for i, c := range jsonStr {
-		if c == '{' {
-			start = i
-			break
-		}
-	}
-	jsonStr = jsonStr[start:]
-
+// loadFromTOML loads a TOML config file and returns the config.
+func loadFromTOML(path string) (*Config, error) {
 	var cfg Config
-	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config JSON: %w", err)
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config TOML: %w", err)
 	}
-
 	return &cfg, nil
 }
 
@@ -381,109 +351,106 @@ func mergeKeybinding(dst *string, src string) {
 	}
 }
 
-// DefaultPkl returns the default configuration as a Pkl string.
+// DefaultTOML returns the default configuration as a TOML string.
 // Used for --init-config to generate a user config file.
-func DefaultPkl() string {
-	return `// Browse configuration
-// Save to ~/.config/browse/config.pkl and customize
-// Only include settings you want to change from defaults
+func DefaultTOML() string {
+	return `# Browse configuration
+# Save to ~/.config/browse/config.toml and customize
+# Only include settings you want to change from defaults
 
-// Display settings
-display = new {
-  // Start in wide mode (full terminal width)
-  wideMode = false
+# Display settings
+[display]
+wideMode = false              # Start in wide mode (full terminal width)
+focusMode = true              # Dim non-focused paragraphs when using paragraph navigation
+showScrollPercentage = true   # Show scroll percentage in status bar
+showUrl = true                # Show URL in status bar
 
-  // Focus mode: dim non-focused paragraphs when using paragraph navigation
-  focusMode = true
+# Search provider settings
+[search]
+defaultProvider = "duckduckgo"
 
-  // Show scroll percentage in status bar
-  showScrollPercentage = true
+# HTTP fetching settings
+[fetcher]
+userAgent = "Browse/1.0 (Terminal Browser)"
+timeoutSeconds = 30
+chromePath = ""               # Path to Chrome/Chromium for JS rendering (empty = auto-detect)
 
-  // Show URL in status bar
-  showUrl = true
-}
+# Rendering settings
+[rendering]
+defaultWidth = 80             # Default width when piping output (not in terminal)
+latexEnabled = true           # Enable LaTeX math rendering
+tablesEnabled = true          # Enable table rendering
 
-// Search provider settings
-search = new {
-  // Default search provider
-  defaultProvider = "duckduckgo"
-}
+# Session settings
+[session]
+restoreSession = true         # Restore previous session on startup
 
-// HTTP fetching settings
-fetcher = new {
-  // User agent string for requests
-  userAgent = "Browse/1.0 (Terminal Browser)"
+# Editor settings
+[editor]
+scheme = "emacs"              # "emacs" or "vim"
 
-  // Request timeout in seconds
-  timeoutSeconds = 30
+# Keybindings - customize your keys here!
+[keybindings]
+# Navigation
+quit = "q"
+scrollDown = "j"
+scrollUp = "k"
+halfPageDown = "d"
+halfPageUp = "u"
+goTop = "gg"
+goBottom = "G"
+prevParagraph = "["
+nextParagraph = "]"
+prevSection = "{"
+nextSection = "}"
 
-  // Path to Chrome/Chromium for JS rendering (empty = auto-detect)
-  chromePath = ""
-}
+# Actions
+openUrl = "o"
+openInBrowser = "go"          # Open current page in default browser
+find = "/"                    # Find in page
+copyUrl = "y"
+editInEditor = "E"
+followLink = "f"
+defineWord = "D"              # Look up word definition
 
-// Rendering settings
-rendering = new {
-  // Default width when piping output (not in terminal)
-  defaultWidth = 80
+# Overlays
+tableOfContents = "t"
+siteNavigation = "n"
+linkIndex = "l"
 
-  // Enable LaTeX math rendering
-  latexEnabled = true
+# History & Buffers
+back = "b"
+forward = "B"
+refresh = "gr"                # Reload current page
+newBuffer = "T"
+nextBuffer = "gt"
+prevBuffer = "gT"
+bufferList = "` + "`" + `"
 
-  // Enable table rendering
-  tablesEnabled = true
-}
+# Favourites
+addFavourite = "M"
+favouritesList = "'"
 
-// Keybindings - customize your keys here!
-keybindings = new {
-  // Navigation
-  quit = "q"
-  scrollDown = "j"
-  scrollUp = "k"
-  halfPageDown = "d"
-  halfPageUp = "u"
-  goTop = "gg"
-  goBottom = "G"
-  prevParagraph = "["
-  nextParagraph = "]"
-  prevSection = "{"
-  nextSection = "}"
+# RSS
+rssFeeds = "F"                # Open RSS feed list
+rssSubscribe = "A"            # Subscribe to current page's feed
+rssUnsubscribe = "x"          # Unsubscribe from feed
+rssRefresh = "gf"             # Refresh all feeds
 
-  // Actions
-  openUrl = "o"
-  openInBrowser = "go"  // open current page in default browser
-  find = "/"            // find in page
-  copyUrl = "y"
-  editInEditor = "E"
-  followLink = "f"
-
-  // Overlays
-  tableOfContents = "t"
-  siteNavigation = "n"
-  linkIndex = "l"
-
-  // History & Buffers
-  back = "b"
-  forward = "B"
-  newBuffer = "T"
-  nextBuffer = "gt"
-  prevBuffer = "gT"
-  bufferList = "` + "`" + `"
-
-  // Favourites
-  addFavourite = "M"
-  favouritesList = "'"
-
-  // Other
-  home = "H"
-  structureInspector = "s"
-  toggleWideMode = "w"
-  inputField = "i"
-  reloadWithJs = "r"
-  generateRules = "R"
-  editConfig = "C"
-  aiSummary = "S"
-  translatePage = "X"  // translate page to English
-}
+# Other
+omnibox = "\x0c"              # Ctrl-l (browser-style address bar)
+home = "H"
+structureInspector = "s"
+toggleWideMode = "w"
+toggleTheme = "z"             # Toggle light/dark theme
+themePicker = "P"             # Open theme picker
+inputField = "i"
+reloadWithJs = "r"
+generateRules = "R"
+editConfig = "C"
+aiSummary = "S"
+editorSandbox = "~"
+translatePage = "X"           # Translate page to English
 `
 }
 

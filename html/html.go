@@ -7,8 +7,9 @@ import (
 	"regexp"
 	"strings"
 
-	"browse/latex"
 	"golang.org/x/net/html"
+
+	"browse/latex"
 )
 
 // whitespaceRe collapses sequences of whitespace to a single space
@@ -174,13 +175,25 @@ func DiscoverFeeds(rawHTML string) []FeedLink {
 
 // Parse extracts article content from HTML, returning a Document with
 // main content and navigation elements separated.
-func Parse(r io.Reader) (*Document, error) {
-	doc, err := html.Parse(r)
-	if err != nil {
-		return nil, err
+func Parse(r io.Reader) (result *Document, err error) {
+	// golang.org/x/net/html panics on deeply nested HTML (>512 elements).
+	// Recover from this and return a proper error.
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.(string); ok && strings.Contains(s, "exceeds") {
+				err = fmt.Errorf("html: document too deeply nested (>512 elements)")
+			} else {
+				panic(r) // re-panic for unexpected panics
+			}
+		}
+	}()
+
+	doc, parseErr := html.Parse(r)
+	if parseErr != nil {
+		return nil, parseErr
 	}
 
-	result := &Document{
+	result = &Document{
 		Content: &Node{Type: NodeDocument},
 	}
 

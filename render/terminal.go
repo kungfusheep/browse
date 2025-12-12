@@ -47,6 +47,11 @@ const (
 	CursorShow     = "\033[?25h"
 	AltScreenEnter = "\033[?1049h"
 	AltScreenExit  = "\033[?1049l"
+
+	// Synchronized output mode - prevents partial frame display (flashing)
+	// Supported by iTerm2, kitty, foot, Alacritty, and other modern terminals
+	SyncBegin = "\033[?2026h"
+	SyncEnd   = "\033[?2026l"
 )
 
 // EnterAltScreen switches to the alternate screen buffer.
