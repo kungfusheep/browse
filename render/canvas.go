@@ -248,13 +248,15 @@ func styleSequence(s Style) string {
 
 // RenderTo writes the canvas to the given file.
 func (c *Canvas) RenderTo(w *os.File) error {
-	_, err := w.WriteString(c.Render())
+	// Use synchronized output to prevent partial frame flashing
+	_, err := w.WriteString(SyncBegin + c.Render() + SyncEnd)
 	return err
 }
 
 // RenderToWithBase writes the canvas with a base style to the given file.
 func (c *Canvas) RenderToWithBase(w *os.File, base Style) error {
-	_, err := w.WriteString(c.RenderWithBase(base))
+	// Use synchronized output to prevent partial frame flashing
+	_, err := w.WriteString(SyncBegin + c.RenderWithBase(base) + SyncEnd)
 	return err
 }
 

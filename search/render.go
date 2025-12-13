@@ -3,6 +3,8 @@ package search
 import (
 	"fmt"
 	"strings"
+
+	"browse/sites"
 )
 
 // ToHTML converts search results into a beautifully formatted HTML document.
@@ -20,11 +22,15 @@ func (r *Results) ToHTML() string {
 
 	// Results as a clean list
 	for i, result := range r.Results {
-		// Result number and title as heading
-		sb.WriteString(fmt.Sprintf("<h2><a href=\"%s\">%d. %s</a></h2>\n",
+		// Quality flair based on domain score
+		flair := qualityFlair(result.Domain)
+
+		// Result number and title as heading (with flair)
+		sb.WriteString(fmt.Sprintf("<h2><a href=\"%s\">%d. %s%s</a></h2>\n",
 			escapeHTML(result.URL),
 			i+1,
-			escapeHTML(result.Title)))
+			escapeHTML(result.Title),
+			flair))
 
 		// Display domain
 		sb.WriteString(fmt.Sprintf("<p><strong>%s</strong></p>\n", escapeHTML(result.Domain)))
@@ -47,4 +53,18 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
+}
+
+// qualityFlair returns a flair suffix based on text-browser compatibility.
+// ★ for excellent compatibility (95+), ✓ for good compatibility (80-94).
+func qualityFlair(domain string) string {
+	domain = strings.TrimPrefix(domain, "www.")
+	if info, known := sites.Lookup(domain); known {
+		if info.Score >= 95 {
+			return " ★"
+		} else if info.Score >= 80 {
+			return " ✓"
+		}
+	}
+	return ""
 }

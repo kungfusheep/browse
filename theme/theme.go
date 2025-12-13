@@ -34,6 +34,9 @@ type Theme struct {
 	Warning Color
 	Success Color
 	Info    Color
+
+	// Quality indicators
+	Gold Color // Known-good sites flair
 }
 
 // Style creates a render.Style with the given foreground color.
@@ -124,6 +127,7 @@ var (
 		Warning:       Hex("d7af5f"),
 		Success:       Hex("5fd75f"),
 		Info:          Hex("5f87d7"),
+		Gold:          Hex("ffd700"), // gold
 	}
 
 	DefaultLight = &Theme{
@@ -140,6 +144,7 @@ var (
 		Warning:    Hex("f57c00"),
 		Success:    Hex("2e7d32"),
 		Info:       Hex("1565c0"),
+		Gold:       Hex("b8860b"), // dark goldenrod
 	}
 
 	// Solarized - Ethan Schoonover's precision colors
@@ -156,7 +161,8 @@ var (
 		Error:      Hex("dc322f"), // red
 		Warning:    Hex("cb4b16"), // orange
 		Success:    Hex("859900"), // green
-		Info:       Hex("268bd2"), // blue
+		Info:       Hex("268bd2"),
+		Gold:          Hex("b58900"), // blue
 	}
 
 	SolarizedLight = &Theme{
@@ -172,7 +178,8 @@ var (
 		Error:      Hex("dc322f"), // red
 		Warning:    Hex("cb4b16"), // orange
 		Success:    Hex("859900"), // green
-		Info:       Hex("268bd2"), // blue
+		Info:       Hex("268bd2"),
+		Gold:          Hex("b58900"), // blue
 	}
 
 	// Nord - Arctic, north-bluish color palette
@@ -189,7 +196,8 @@ var (
 		Error:      Hex("bf616a"), // nord11 (red)
 		Warning:    Hex("d08770"), // nord12 (orange)
 		Success:    Hex("a3be8c"), // nord14 (green)
-		Info:       Hex("81a1c1"), // nord9 (frost)
+		Info:       Hex("81a1c1"),
+		Gold:          Hex("ebcb8b"), // nord9 (frost)
 	}
 
 	// Dracula - Dark theme with vivid colors
@@ -206,7 +214,8 @@ var (
 		Error:      Hex("ff5555"), // red
 		Warning:    Hex("ffb86c"), // orange
 		Success:    Hex("50fa7b"), // green
-		Info:       Hex("bd93f9"), // purple
+		Info:       Hex("bd93f9"),
+		Gold:          Hex("f1fa8c"), // purple
 	}
 
 	// Gruvbox - Retro groove color scheme
@@ -223,7 +232,8 @@ var (
 		Error:      Hex("fb4934"), // red
 		Warning:    Hex("fe8019"), // orange
 		Success:    Hex("b8bb26"), // green
-		Info:       Hex("83a598"), // blue
+		Info:       Hex("83a598"),
+		Gold:          Hex("d79921"), // blue
 	}
 
 	GruvboxLight = &Theme{
@@ -239,7 +249,8 @@ var (
 		Error:      Hex("9d0006"), // red
 		Warning:    Hex("af3a03"), // orange
 		Success:    Hex("79740e"), // green
-		Info:       Hex("076678"), // blue
+		Info:       Hex("076678"),
+		Gold:          Hex("b57614"), // blue
 	}
 
 	// Tokyo Night - Clean dark theme inspired by Tokyo city lights
@@ -256,7 +267,8 @@ var (
 		Error:      Hex("f7768e"), // red
 		Warning:    Hex("ff9e64"), // orange
 		Success:    Hex("9ece6a"), // green
-		Info:       Hex("7aa2f7"), // blue
+		Info:       Hex("7aa2f7"),
+		Gold:          Hex("e0af68"), // blue
 	}
 
 	// Monokai - Classic dark theme
@@ -273,7 +285,8 @@ var (
 		Error:      Hex("f92672"), // red/pink
 		Warning:    Hex("fd971f"), // orange
 		Success:    Hex("a6e22e"), // green
-		Info:       Hex("ae81ff"), // purple
+		Info:       Hex("ae81ff"),
+		Gold:          Hex("e6db74"), // purple
 	}
 
 	// Rose Pine - All natural pine, faux fur and a bit of soho vibes
@@ -290,7 +303,8 @@ var (
 		Error:      Hex("eb6f92"), // love
 		Warning:    Hex("f6c177"), // gold
 		Success:    Hex("31748f"), // pine
-		Info:       Hex("c4a7e7"), // iris
+		Info:       Hex("c4a7e7"),
+		Gold:          Hex("f6c177"), // iris
 	}
 
 	RosePineMoon = &Theme{
@@ -306,7 +320,8 @@ var (
 		Error:      Hex("eb6f92"), // love
 		Warning:    Hex("f6c177"), // gold
 		Success:    Hex("3e8fb0"), // pine
-		Info:       Hex("c4a7e7"), // iris
+		Info:       Hex("c4a7e7"),
+		Gold:          Hex("f6c177"), // iris
 	}
 
 	RosePineDawn = &Theme{
@@ -322,7 +337,8 @@ var (
 		Error:      Hex("b4637a"), // love
 		Warning:    Hex("ea9d34"), // gold
 		Success:    Hex("286983"), // pine
-		Info:       Hex("907aa9"), // iris
+		Info:       Hex("907aa9"),
+		Gold:          Hex("ea9d34"), // iris
 	}
 
 	// Catppuccin - Soothing pastel theme
@@ -339,7 +355,8 @@ var (
 		Error:      Hex("f38ba8"), // red
 		Warning:    Hex("fab387"), // peach
 		Success:    Hex("a6e3a1"), // green
-		Info:       Hex("89b4fa"), // blue
+		Info:       Hex("89b4fa"),
+		Gold:          Hex("f9e2af"), // blue
 	}
 
 	CatppuccinLatte = &Theme{
@@ -355,7 +372,8 @@ var (
 		Error:      Hex("d20f39"), // red
 		Warning:    Hex("fe640b"), // peach
 		Success:    Hex("40a02b"), // green
-		Info:       Hex("1e66f5"), // blue
+		Info:       Hex("1e66f5"),
+		Gold:          Hex("df8e1d"), // blue
 	}
 
 	// One Dark - Atom's iconic dark theme
@@ -372,7 +390,8 @@ var (
 		Error:      Hex("e06c75"), // red
 		Warning:    Hex("d19a66"), // orange
 		Success:    Hex("98c379"), // green
-		Info:       Hex("61afef"), // blue
+		Info:       Hex("61afef"),
+		Gold:          Hex("e5c07b"), // blue
 	}
 
 	// Kanagawa - Inspired by Katsushika Hokusai's The Great Wave
@@ -389,7 +408,8 @@ var (
 		Error:      Hex("c34043"), // autumnRed
 		Warning:    Hex("ffa066"), // surimiOrange
 		Success:    Hex("76946a"), // autumnGreen
-		Info:       Hex("7fb4ca"), // springBlue
+		Info:       Hex("7fb4ca"),
+		Gold:          Hex("c0a36e"), // springBlue
 	}
 
 	// Everforest - Green-tinted, easy on the eyes
@@ -406,7 +426,8 @@ var (
 		Error:      Hex("e67e80"), // red
 		Warning:    Hex("e69875"), // orange
 		Success:    Hex("a7c080"), // green
-		Info:       Hex("7fbbb3"), // blue
+		Info:       Hex("7fbbb3"),
+		Gold:          Hex("dbbc7f"), // blue
 	}
 
 	EverforestLight = &Theme{
@@ -422,7 +443,8 @@ var (
 		Error:      Hex("f85552"), // red
 		Warning:    Hex("f57d26"), // orange
 		Success:    Hex("8da101"), // green
-		Info:       Hex("3a94c5"), // blue
+		Info:       Hex("3a94c5"),
+		Gold:          Hex("dfa000"), // blue
 	}
 
 	// Ayu - Clean, modern theme
@@ -439,7 +461,8 @@ var (
 		Error:      Hex("d95757"), // error
 		Warning:    Hex("ffb454"), // yellow
 		Success:    Hex("aad94c"), // green
-		Info:       Hex("59c2ff"), // blue
+		Info:       Hex("59c2ff"),
+		Gold:          Hex("ffb454"), // blue
 	}
 
 	AyuMirage = &Theme{
@@ -455,7 +478,8 @@ var (
 		Error:      Hex("ff6666"), // error
 		Warning:    Hex("ffcc66"), // yellow
 		Success:    Hex("bae67e"), // green
-		Info:       Hex("73d0ff"), // blue
+		Info:       Hex("73d0ff"),
+		Gold:          Hex("ffd580"), // blue
 	}
 
 	AyuLight = &Theme{
@@ -471,7 +495,8 @@ var (
 		Error:      Hex("f51818"), // error
 		Warning:    Hex("fa8d3e"), // orange
 		Success:    Hex("86b300"), // green
-		Info:       Hex("399ee6"), // blue
+		Info:       Hex("399ee6"),
+		Gold:          Hex("f2ae49"), // blue
 	}
 )
 

@@ -3,10 +3,12 @@ package document
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"browse/html"
 	"browse/render"
+	"browse/sites"
 	"browse/theme"
 )
 
@@ -244,15 +246,16 @@ func FindAnchorY(doc *html.Document, id string, contentWidth int) (int, bool) {
 
 // Renderer converts HTML nodes to canvas output.
 type Renderer struct {
-	canvas       *render.Canvas
-	contentWidth int
-	leftMargin   int
-	y            int
-	scrollY      int // current scroll offset for computing absolute positions
-	links        []Link
-	inputs       []Input
-	headings     []Heading
-	paragraphs   []int // Y positions of paragraph-like elements for navigation
+	canvas        *render.Canvas
+	contentWidth  int
+	leftMargin    int
+	y             int
+	scrollY       int // current scroll offset for computing absolute positions
+	links         []Link
+	inputs        []Input
+	headings      []Heading
+	paragraphs    []int  // Y positions of paragraph-like elements for navigation
+	currentDomain string // domain of current page (for detecting internal links)
 
 	// Current form context (for inputs)
 	currentFormAction string
@@ -315,6 +318,12 @@ func (r *Renderer) SetFocusMode(active bool, startY, endY int) {
 	r.focusModeActive = active
 	r.focusStartY = startY
 	r.focusEndY = endY
+}
+
+// SetCurrentDomain sets the domain of the current page.
+// Used to detect internal links (which don't get gold star flair).
+func (r *Renderer) SetCurrentDomain(domain string) {
+	r.currentDomain = strings.TrimPrefix(domain, "www.")
 }
 
 // ApplyFocusDimming dims all content outside the focused paragraph range.
@@ -778,6 +787,24 @@ func (r *Renderer) extractSpansRecursive(n *html.Node, style render.Style, href 
 			linkStyle.UseBgRGB = true
 			linkStyle.BgRGB = bgRGB
 			r.extractSpansRecursive(child, linkStyle, child.Href, isImage, spans)
+			// Add compatibility flair for external sites (skip internal links)
+			// ★ excellent text-browser compatibility (95+), ✓ good compatibility (80-94)
+			if child.Href != "" {
+				if u, err := url.Parse(child.Href); err == nil && u.Host != "" {
+					domain := strings.TrimPrefix(u.Host, "www.")
+					if domain != r.currentDomain {
+						if info, known := sites.Lookup(domain); known {
+							if info.Score >= 95 {
+								goldStyle := theme.Current.Gold.Style()
+								*spans = append(*spans, textSpan{Text: " ★", Style: goldStyle, Href: child.Href, IsImage: isImage})
+							} else if info.Score >= 80 {
+								accentStyle := theme.Current.Accent.Style()
+								*spans = append(*spans, textSpan{Text: " ✓", Style: accentStyle, Href: child.Href, IsImage: isImage})
+							}
+						}
+					}
+				}
+			}
 		case html.NodeImage:
 			// Images get theme accent color and mark as image for Quick Look
 			imgStyle := theme.Current.Accent.Style()

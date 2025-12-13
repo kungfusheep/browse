@@ -14,7 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -90,6 +90,7 @@ func main() {
 		seedFile    = flag.String("seeds", "", "File containing seed URLs (one per line)")
 		addSeed     = flag.String("add", "", "Add a single seed URL")
 		exportJSON  = flag.String("export", "", "Export high-scoring sites to JSON file")
+		exportGo    = flag.String("export-go", "", "Export known-good domains to Go source file")
 		minScore    = flag.Int("min-score", 50, "Minimum score for export")
 		stats       = flag.Bool("stats", false, "Show database statistics")
 	)
@@ -123,6 +124,13 @@ func main() {
 			log.Fatalf("Export failed: %v", err)
 		}
 		fmt.Printf("Exported sites with score >= %d to %s\n", *minScore, *exportJSON)
+		return
+	}
+
+	if *exportGo != "" {
+		if err := exportGoSource(db, *exportGo, *minScore); err != nil {
+			log.Fatalf("Export failed: %v", err)
+		}
 		return
 	}
 
@@ -278,6 +286,9 @@ func (c *Crawler) Run() error {
 		}
 	}()
 
+	// Poll for new seeds added to DB while running
+	go c.pollForNewSeeds()
+
 	// Wait for completion or shutdown
 	c.wg.Wait()
 	close(c.results)
@@ -377,36 +388,22 @@ func (c *Crawler) analyzeSite(job CrawlJob) (Site, error) {
 		LastCrawled: time.Now(),
 	}
 
-	// Fetch page
-	req, err := http.NewRequestWithContext(c.ctx, "GET", job.URL, nil)
+	// Fetch homepage
+	htmlContent, err := c.fetchPage(job.URL)
 	if err != nil {
 		return site, err
 	}
-	req.Header.Set("User-Agent", c.config.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return site, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return site, fmt.Errorf("status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024)) // 5MB limit
-	if err != nil {
-		return site, err
-	}
-
-	htmlContent := string(body)
 
 	// Check for bot protection
 	if isBotProtected(htmlContent) {
 		site.BotProtected = true
-		site.Score = 10 // Low score but still catalogue it
+		site.Score = 10
 		return site, nil
+	}
+
+	// Check homepage for JS requirement
+	if needsJavaScript(htmlContent) {
+		site.NeedsJS = true
 	}
 
 	// Parse with our HTML parser
@@ -421,28 +418,157 @@ func (c *Crawler) analyzeSite(job CrawlJob) (Site, error) {
 		site.Name = domain
 	}
 
-	// Analyze content quality
+	// Analyze homepage
 	site.ContentNodes = countContentNodes(doc)
-	site.Score = calculateScore(doc, htmlContent)
+	homeScore := calculateScore(doc, htmlContent)
 
 	// Find RSS feeds
 	rssURL := findRSSFeed(htmlContent, job.URL)
 	if rssURL != "" {
 		site.HasRSS = true
 		site.RSSURL = rssURL
-		site.Score += 15 // Bonus for RSS
 	}
 
-	// Extract external links
+	// Extract external links from homepage
 	site.ExternalLinks = extractExternalLinks(htmlContent, domain)
+
+	// Sample internal pages (up to 3) for better quality assessment
+	internalLinks := extractInternalLinks(htmlContent, job.URL, domain)
+	worstScore := homeScore
+	sampledPages := 0
+	const maxSamples = 3
+
+	for i := 0; i < len(internalLinks) && sampledPages < maxSamples; i++ {
+		// Pick links that look like content (articles, posts, docs)
+		link := internalLinks[i]
+		if !looksLikeContent(link) {
+			continue
+		}
+
+		pageContent, err := c.fetchPage(link)
+		if err != nil {
+			continue
+		}
+
+		// Check for JS requirement on internal pages
+		if needsJavaScript(pageContent) {
+			site.NeedsJS = true
+			worstScore = min(worstScore, 20) // Heavy penalty
+			log.Printf("[%s] Internal page requires JS: %s", domain, link)
+		}
+
+		// Parse and score
+		pageDoc, err := html.ParseString(pageContent)
+		if err != nil {
+			continue
+		}
+
+		pageScore := calculateScore(pageDoc, pageContent)
+		if pageScore < worstScore {
+			worstScore = pageScore
+		}
+
+		// Collect more external links from internal pages
+		moreLinks := extractExternalLinks(pageContent, domain)
+		site.ExternalLinks = append(site.ExternalLinks, moreLinks...)
+
+		sampledPages++
+	}
+
+	// Final score based on worst performing page
+	site.Score = worstScore
+	if site.HasRSS {
+		site.Score += 15 // RSS bonus
+	}
+	if site.NeedsJS {
+		site.Score = max(site.Score-30, 5) // JS penalty
+	}
+
+	// Deduplicate external links
+	site.ExternalLinks = dedupeLinks(site.ExternalLinks)
 
 	// Categorize
 	site.Category = categorize(domain, doc)
 
-	log.Printf("[%s] Score: %d, Nodes: %d, RSS: %v, Links: %d",
-		domain, site.Score, site.ContentNodes, site.HasRSS, len(site.ExternalLinks))
+	log.Printf("[%s] Score: %d (home: %d, sampled: %d pages), Nodes: %d, RSS: %v, NeedsJS: %v, Links: %d",
+		domain, site.Score, homeScore, sampledPages, site.ContentNodes, site.HasRSS, site.NeedsJS, len(site.ExternalLinks))
 
 	return site, nil
+}
+
+// fetchPage retrieves a single page
+func (c *Crawler) fetchPage(pageURL string) (string, error) {
+	req, err := http.NewRequestWithContext(c.ctx, "GET", pageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", c.config.UserAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+// looksLikeContent checks if URL looks like an article/content page
+func looksLikeContent(u string) bool {
+	lower := strings.ToLower(u)
+	// Skip common non-content paths
+	skipPatterns := []string{
+		"/login", "/signin", "/signup", "/register",
+		"/cart", "/checkout", "/account",
+		"/search", "/tag/", "/category/", "/author/",
+		"/page/", "/feed", "/rss",
+		"/wp-admin", "/wp-content", "/wp-includes",
+		"/cdn-cgi/", "/assets/", "/static/",
+		"/privacy", "/terms", "/contact", "/about",
+	}
+	for _, p := range skipPatterns {
+		if strings.Contains(lower, p) {
+			return false
+		}
+	}
+	// Prefer paths that look like articles
+	goodPatterns := []string{
+		"/blog/", "/post/", "/article/", "/news/",
+		"/docs/", "/doc/", "/guide/", "/tutorial/",
+		"/wiki/", "/entry/", "/p/", "/posts/",
+		"/20", // Date-based URLs like /2024/01/title
+	}
+	for _, p := range goodPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	// Accept if path has some depth (not just homepage)
+	parsed, _ := url.Parse(u)
+	return parsed != nil && len(parsed.Path) > 5
+}
+
+// dedupeLinks removes duplicate URLs
+func dedupeLinks(links []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, l := range links {
+		if !seen[l] {
+			seen[l] = true
+			result = append(result, l)
+		}
+	}
+	return result
 }
 
 func (c *Crawler) rateLimit(domain string) {
@@ -582,6 +708,51 @@ func (c *Crawler) loadQueue() ([]CrawlJob, error) {
 	return jobs, rows.Err()
 }
 
+// pollForNewSeeds checks the queue table every 30 seconds for new seeds
+// added while the crawler is running (via -add or direct SQL insert)
+func (c *Crawler) pollForNewSeeds() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			jobs, err := c.loadQueue()
+			if err != nil {
+				log.Printf("Error polling for new seeds: %v", err)
+				continue
+			}
+			if len(jobs) == 0 {
+				continue
+			}
+
+			added := 0
+			for _, job := range jobs {
+				domain := extractDomain(job.URL)
+				c.visitedMu.RLock()
+				alreadyVisited := c.visited[domain]
+				c.visitedMu.RUnlock()
+
+				if alreadyVisited || c.isBlacklisted(domain) {
+					continue
+				}
+
+				select {
+				case c.queue <- job:
+					added++
+				default:
+					// Queue full
+				}
+			}
+			if added > 0 {
+				log.Printf("Hot-loaded %d new seeds", added)
+			}
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
 func (c *Crawler) saveQueue() {
 	// Save unprocessed items back to queue
 	tx, _ := c.db.Begin()
@@ -635,7 +806,95 @@ func isBotProtected(html string) bool {
 	return strings.Contains(html, "captcha-delivery.com") ||
 		strings.Contains(html, "Please enable JS and disable any ad blocker") ||
 		strings.Contains(html, "cf-browser-verification") ||
-		strings.Contains(html, "Checking your browser")
+		strings.Contains(html, "Checking your browser") ||
+		strings.Contains(html, "Just a moment") ||
+		strings.Contains(html, "Attention Required")
+}
+
+// needsJavaScript detects pages that require JS to display content
+func needsJavaScript(htmlContent string) bool {
+	lower := strings.ToLower(htmlContent)
+	patterns := []string{
+		"please enable javascript",
+		"javascript is required",
+		"javascript is disabled",
+		"enable javascript to",
+		"requires javascript",
+		"you need to enable javascript",
+		"turn on javascript",
+		"javascript must be enabled",
+		"this site requires javascript",
+		"please turn on javascript",
+		"browser does not support javascript",
+		"javascript needs to be enabled",
+		"<noscript>",
+		"you must have javascript enabled",
+		"this page requires javascript",
+		"content requires javascript",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractInternalLinks finds links to other pages on the same domain
+func extractInternalLinks(htmlContent, baseURL, domain string) []string {
+	// Simple regex to find href values
+	hrefRe := regexp.MustCompile(`href=["']([^"']+)["']`)
+	matches := hrefRe.FindAllStringSubmatch(htmlContent, -1)
+
+	base, _ := url.Parse(baseURL)
+	seen := make(map[string]bool)
+	var links []string
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		href := match[1]
+
+		// Skip anchors, javascript, mailto
+		if strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "mailto:") {
+			continue
+		}
+
+		// Resolve relative URLs
+		parsed, err := url.Parse(href)
+		if err != nil {
+			continue
+		}
+		resolved := base.ResolveReference(parsed)
+
+		// Must be same domain
+		if resolved.Host != "" && resolved.Host != domain && resolved.Host != "www."+domain && "www."+resolved.Host != domain {
+			continue
+		}
+
+		// Normalize
+		resolved.Fragment = ""
+		fullURL := resolved.String()
+
+		// Skip duplicates and non-content paths
+		if seen[fullURL] {
+			continue
+		}
+		path := strings.ToLower(resolved.Path)
+		if strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".js") ||
+			strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".jpg") ||
+			strings.HasSuffix(path, ".gif") || strings.HasSuffix(path, ".svg") ||
+			strings.HasSuffix(path, ".ico") || strings.HasSuffix(path, ".xml") ||
+			strings.HasSuffix(path, ".json") || strings.HasSuffix(path, ".pdf") {
+			continue
+		}
+
+		seen[fullURL] = true
+		links = append(links, fullURL)
+	}
+
+	return links
 }
 
 func countContentNodes(doc *html.Document) int {
@@ -1003,5 +1262,91 @@ func exportSites(db *sql.DB, filename string, minScore int) error {
 	}
 	f.WriteString("\n]\n")
 
+	return nil
+}
+
+func exportGoSource(db *sql.DB, filename string, minScore int) error {
+	// Query domains with score >= minScore, excluding bot-protected and JS-required
+	rows, err := db.Query(`
+		SELECT domain, score, has_rss
+		FROM sites
+		WHERE score >= ? AND bot_protected = 0 AND needs_js = 0
+		ORDER BY domain
+	`, minScore)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type entry struct {
+		domain string
+		score  int
+		hasRSS bool
+	}
+	var entries []entry
+
+	for rows.Next() {
+		var e entry
+		if err := rows.Scan(&e.domain, &e.score, &e.hasRSS); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Write package header
+	f.WriteString(`// Code generated by crawl -export-go. DO NOT EDIT.
+// Regenerate with: ./crawl -db crawler.db -export-go sites/known.go -min-score 80
+
+package sites
+
+// SiteInfo contains quality information about a known domain.
+type SiteInfo struct {
+	Score  uint8 // Quality score (0-110+, capped at 255)
+	HasRSS bool  // Whether the site has an RSS feed
+}
+
+// KnownSites maps domains to their quality info.
+// Generated from crawler database.
+var KnownSites = map[string]SiteInfo{
+`)
+
+	for _, e := range entries {
+		score := e.score
+		if score > 255 {
+			score = 255
+		}
+		f.WriteString(fmt.Sprintf("\t%q: {Score: %d, HasRSS: %v},\n", e.domain, score, e.hasRSS))
+	}
+
+	f.WriteString(`}
+
+// Lookup returns site info for a domain, and whether it was found.
+func Lookup(domain string) (SiteInfo, bool) {
+	info, ok := KnownSites[domain]
+	return info, ok
+}
+
+// IsKnownGood returns true if the domain is in our known-good list.
+func IsKnownGood(domain string) bool {
+	_, ok := KnownSites[domain]
+	return ok
+}
+
+// Score returns the quality score for a domain (0 if unknown).
+func Score(domain string) int {
+	if info, ok := KnownSites[domain]; ok {
+		return int(info.Score)
+	}
+	return 0
+}
+`)
+
+	fmt.Printf("Exported %d domains (score >= %d) to %s\n", len(entries), minScore, filename)
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 // FetchResult contains the fetched HTML and metadata.
 type FetchResult struct {
 	HTML        string
+	FinalURL    string        // URL after following redirects
 	UsedBrowser bool
 	FetchTime   time.Duration
 }
@@ -128,8 +129,12 @@ func Simple(url string) (*FetchResult, error) {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 
+	// Capture final URL after redirects
+	finalURL := resp.Request.URL.String()
+
 	return &FetchResult{
 		HTML:        string(body),
+		FinalURL:    finalURL,
 		UsedBrowser: false,
 		FetchTime:   time.Since(start),
 	}, nil
@@ -260,6 +265,7 @@ func withBrowserGoogle(targetURL string) (*FetchResult, error) {
 	defer cancel()
 
 	var html string
+	var finalURL string
 	err := chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			_, err := page.AddScriptToEvaluateOnNewDocument(stealthScript).Do(ctx)
@@ -316,6 +322,8 @@ func withBrowserGoogle(targetURL string) (*FetchResult, error) {
 			return nil
 		}),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+		// Capture final URL after any redirects
+		chromedp.Location(&finalURL),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("browser fetch: %w", err)
@@ -323,6 +331,7 @@ func withBrowserGoogle(targetURL string) (*FetchResult, error) {
 
 	return &FetchResult{
 		HTML:        html,
+		FinalURL:    finalURL,
 		UsedBrowser: true,
 		FetchTime:   time.Since(start),
 	}, nil
@@ -381,6 +390,7 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 	defer cancel()
 
 	var html string
+	var finalURL string
 	err := chromedp.Run(ctx,
 		// Inject stealth script before page loads
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -438,6 +448,8 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 			return nil
 		}),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
+		// Capture final URL after any redirects
+		chromedp.Location(&finalURL),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("browser fetch: %w", err)
@@ -445,6 +457,7 @@ func withBrowserInternal(targetURL string, headless bool) (*FetchResult, error) 
 
 	return &FetchResult{
 		HTML:        html,
+		FinalURL:    finalURL,
 		UsedBrowser: true,
 		FetchTime:   time.Since(start),
 	}, nil
