@@ -1,3 +1,15 @@
 browse
 testpages
 TODO.md
+
+# Crawler artifacts
+crawl
+crawler.db
+crawler.db-shm
+crawler.db-wal
+crawl.log
+crawlplan.md
+seeder
+seeder.log
+seeds.txt
+seeds_new.txt
