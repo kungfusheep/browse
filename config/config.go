@@ -68,13 +68,13 @@ type Keybindings struct {
 	NextSection   string `json:"nextSection"`
 
 	// Actions
-	OpenUrl       string `json:"openUrl"`
+	OpenUrl       string `json:"openUrl"`       // legacy alias for omnibox
 	OpenInBrowser string `json:"openInBrowser"` // open current page in default browser
 	Find          string `json:"find"`          // find in page
 	CopyUrl       string `json:"copyUrl"`
 	EditInEditor  string `json:"editInEditor"`
 	FollowLink    string `json:"followLink"`
-	DefineWord    string `json:"defineWord"`    // look up word definition
+	DefineWord    string `json:"defineWord"` // look up word definition
 
 	// Overlays
 	TableOfContents string `json:"tableOfContents"`
@@ -104,11 +104,12 @@ type Keybindings struct {
 	Omnibox string `json:"omnibox"`
 
 	// Other
+	Help               string `json:"help"` // open help/quickstart page
 	Home               string `json:"home"`
 	StructureInspector string `json:"structureInspector"`
 	ToggleWideMode     string `json:"toggleWideMode"`
-	ToggleTheme        string `json:"toggleTheme"`  // toggle light/dark theme
-	ThemePicker        string `json:"themePicker"`  // open theme picker
+	ToggleTheme        string `json:"toggleTheme"` // toggle light/dark theme
+	ThemePicker        string `json:"themePicker"` // open theme picker
 	InputField         string `json:"inputField"`
 	ReloadWithJs       string `json:"reloadWithJs"`
 	GenerateRules      string `json:"generateRules"`
@@ -169,10 +170,10 @@ func Default() *Config {
 			NextParagraph:      "]",
 			PrevSection:        "{",
 			NextSection:        "}",
-			OpenUrl:       "o",
-			OpenInBrowser: "go",
-			Find:          "/",
-			CopyUrl:       "y",
+			OpenUrl:            "o",
+			OpenInBrowser:      "go",
+			Find:               "/",
+			CopyUrl:            "y",
 			EditInEditor:       "E",
 			FollowLink:         "f",
 			DefineWord:         "D",
@@ -193,6 +194,7 @@ func Default() *Config {
 			RSSUnsubscribe:     "x",
 			RSSRefresh:         "gf",
 			Omnibox:            "\x0c", // Ctrl-l (browser-style address bar)
+			Help:               "?",
 			Home:               "H",
 			StructureInspector: "s",
 			ToggleWideMode:     "w",
@@ -359,6 +361,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.RSSUnsubscribe, user.Keybindings.RSSUnsubscribe)
 	mergeKeybinding(&result.Keybindings.RSSRefresh, user.Keybindings.RSSRefresh)
 	mergeKeybinding(&result.Keybindings.Omnibox, user.Keybindings.Omnibox)
+	mergeKeybinding(&result.Keybindings.Help, user.Keybindings.Help)
 	mergeKeybinding(&result.Keybindings.Home, user.Keybindings.Home)
 	mergeKeybinding(&result.Keybindings.StructureInspector, user.Keybindings.StructureInspector)
 	mergeKeybinding(&result.Keybindings.ToggleWideMode, user.Keybindings.ToggleWideMode)
@@ -449,7 +452,8 @@ keybindings = new {
   nextSection = "}"
 
   // Actions
-  openUrl = "o"
+  omnibox = "\u000c"       // Ctrl+L (URL/search/AI)
+  openUrl = "o"          // legacy alias for omnibox
   openInBrowser = "go"  // open current page in default browser
   find = "/"            // find in page
   copyUrl = "y"
@@ -474,6 +478,7 @@ keybindings = new {
   favouritesList = "'"
 
   // Other
+  help = "?"              // open help/quickstart
   home = "H"
   structureInspector = "s"
   toggleWideMode = "w"

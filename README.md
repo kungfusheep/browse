@@ -22,13 +22,17 @@ go build
 |-----|--------|
 | `j/k` | Scroll down/up |
 | `d/u` | Half-page down/up |
-| `g/G` | Top/bottom |
+| `gg/G` | Top/bottom |
+| `[/]` | Prev/next paragraph |
+| `{/}` | Prev/next section |
 | `f` | Follow link (labels appear) |
 | `t` | Table of contents |
 | `n` | Navigation overlay |
-| `o` | Open URL |
-| `b/B` | Back/forward |
+| `Ctrl+L` | Omnibox (URL/search/AI) |
+| `/` | Find in page |
+| `Ctrl+O/Tab` | Back/forward |
 | `H` | Home |
+| `?` | Help / quickstart |
 | `i` | Input mode (forms) |
 | `w` | Toggle wide mode |
 | `s` | DOM inspector |
