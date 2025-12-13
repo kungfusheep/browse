@@ -8,15 +8,15 @@ import (
 
 // Result represents the parsed omnibox input.
 type Result struct {
-	URL             string // The target URL to navigate to (empty for internal search)
-	Query           string // Search query (for internal search)
-	IsSearch        bool   // Whether this is a search (vs direct navigation)
-	UseInternal     bool   // Use internal search provider (like / search)
-	Provider        string // The search provider used (if IsSearch)
-	IsAISummary     bool   // Whether this is an AI summary request
-	AIPrompt        string // Optional custom prompt for AI (empty = default summary)
-	IsDictLookup    bool   // Whether this is a dictionary lookup
-	DictWord        string // Word to look up in dictionary
+	URL          string // The target URL to navigate to (empty for internal search)
+	Query        string // Search query (for internal search)
+	IsSearch     bool   // Whether this is a search (vs direct navigation)
+	UseInternal  bool   // Use internal search provider (like / search)
+	Provider     string // The search provider used (if IsSearch)
+	IsAISummary  bool   // Whether this is an AI summary request
+	AIPrompt     string // Optional custom prompt for AI (empty = default summary)
+	IsDictLookup bool   // Whether this is a dictionary lookup
+	DictWord     string // Word to look up in dictionary
 }
 
 // Prefix represents a search prefix configuration.
@@ -85,8 +85,8 @@ func DefaultPrefixes() []Prefix {
 
 // Parser handles omnibox input parsing.
 type Parser struct {
-	prefixes       []Prefix
-	defaultSearch  string // URL format for default search
+	prefixes      []Prefix
+	defaultSearch string // URL format for default search
 }
 
 // NewParser creates a new omnibox parser with default configuration.
@@ -114,13 +114,24 @@ func (p *Parser) Parse(input string) Result {
 		return Result{}
 	}
 
-	// Check for URL schemes first
-	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+	inputLower := strings.ToLower(input)
+
+	// Quick internal commands
+	switch inputLower {
+	case "?", "help":
+		return Result{URL: "browse://help", IsSearch: false}
+	case "home":
+		return Result{URL: "browse://home", IsSearch: false}
+	case "rss", "feeds", "feed":
+		return Result{URL: "rss://", IsSearch: false}
+	}
+
+	// Check for explicit URL schemes first (including internal schemes like browse://, rss://).
+	if strings.Contains(input, "://") {
 		return Result{URL: input, IsSearch: false}
 	}
 
 	// Check for AI summary prefixes
-	inputLower := strings.ToLower(input)
 	if inputLower == "sum" || inputLower == "ai" || inputLower == "summary" {
 		return Result{IsAISummary: true, Provider: "AI Summary"}
 	}
@@ -131,9 +142,24 @@ func (p *Parser) Parse(input string) Result {
 			return Result{IsAISummary: true, AIPrompt: prompt, Provider: "AI Summary"}
 		}
 	}
+	// AI with custom prompt: "ai:<question>" or "sum:<question>"
+	for _, aiPrefix := range []string{"ai:", "sum:", "summary:"} {
+		if strings.HasPrefix(inputLower, aiPrefix) {
+			prompt := strings.TrimSpace(input[len(aiPrefix):])
+			return Result{IsAISummary: true, AIPrompt: prompt, Provider: "AI Summary"}
+		}
+	}
 
 	// Check for dictionary lookup prefixes
 	for _, dictPrefix := range []string{"dict ", "define ", "d "} {
+		if strings.HasPrefix(inputLower, dictPrefix) {
+			word := strings.TrimSpace(input[len(dictPrefix):])
+			if word != "" {
+				return Result{IsDictLookup: true, DictWord: word, Provider: "Dictionary"}
+			}
+		}
+	}
+	for _, dictPrefix := range []string{"dict:", "define:", "d:"} {
 		if strings.HasPrefix(inputLower, dictPrefix) {
 			word := strings.TrimSpace(input[len(dictPrefix):])
 			if word != "" {
@@ -161,6 +187,34 @@ func (p *Parser) Parse(input string) Result {
 							}
 						}
 						// External URL-based search
+						return Result{
+							URL:      strings.Replace(pfx.URLFmt, "%s", url.QueryEscape(query), 1),
+							IsSearch: true,
+							Provider: pfx.Display,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check for colon-separated prefixes (e.g., "wp:cats" or "gh:openai")
+	if idx := strings.Index(input, ":"); idx > 0 {
+		prefix := strings.ToLower(strings.TrimSpace(input[:idx]))
+		query := strings.TrimSpace(input[idx+1:])
+
+		if query != "" {
+			for _, pfx := range p.prefixes {
+				for _, name := range pfx.Names {
+					if prefix == name {
+						if pfx.Internal {
+							return Result{
+								Query:       query,
+								IsSearch:    true,
+								UseInternal: true,
+								Provider:    pfx.Display,
+							}
+						}
 						return Result{
 							URL:      strings.Replace(pfx.URLFmt, "%s", url.QueryEscape(query), 1),
 							IsSearch: true,

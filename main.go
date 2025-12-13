@@ -132,9 +132,10 @@ func runPrint(url string) error {
 	// Load favourites for landing page
 	favStore, _ := favourites.Load()
 
-	if url == "" {
-		doc, err = landingPage(favStore)
-	} else {
+	switch {
+	case url == "" || strings.HasPrefix(url, "browse://"):
+		doc, _, err = handleBrowseURL(url, favStore)
+	default:
 		doc, err = fetchAndParseQuiet(url)
 	}
 	if err != nil {
@@ -273,9 +274,10 @@ func run(url string) error {
 			// Restore buffers from session
 			for _, sb := range savedSession.Buffers {
 				var pageDoc *html.Document
+				var pageHTML string
 				pageURL := sb.Current.URL
-				if pageURL == "browse://home" {
-					pageDoc, _ = landingPage(favStore)
+				if pageURL == "" || strings.HasPrefix(pageURL, "browse://") {
+					pageDoc, pageHTML, _ = handleBrowseURL(pageURL, favStore)
 				} else if strings.HasPrefix(pageURL, "rss://") {
 					pageDoc, _ = handleRSSURL(rssStore, pageURL)
 				} else {
@@ -287,7 +289,7 @@ func run(url string) error {
 				}
 				if pageDoc != nil {
 					b := buffer{
-						current: pageState{url: pageURL, doc: pageDoc, scrollY: sb.Current.ScrollY},
+						current: pageState{url: pageURL, doc: pageDoc, scrollY: sb.Current.ScrollY, html: pageHTML},
 					}
 					// Restore back history (docs will be fetched on demand)
 					for _, h := range sb.History {
@@ -320,19 +322,20 @@ func run(url string) error {
 
 	// If session wasn't restored, start fresh
 	if !sessionRestored {
-		if url == "" {
-			doc, err = landingPage(favStore)
+		var pageHTML string
+		switch {
+		case url == "":
+			doc, pageHTML, err = handleBrowseURL("browse://home", favStore)
 			url = "browse://home"
-		} else {
-			var finalURL string
-			doc, finalURL, err = fetchAndParse(url)
-			if finalURL != "" {
-				url = finalURL // Use final URL after redirects
-			}
+		case strings.HasPrefix(url, "browse://"):
+			doc, pageHTML, err = handleBrowseURL(url, favStore)
+		default:
+			doc, err = fetchAndParse(url)
 		}
 		if err != nil {
 			return err
 		}
+		currentHTML = pageHTML
 		buffers = []buffer{{
 			current: pageState{url: url, doc: doc, scrollY: 0, html: currentHTML},
 		}}
@@ -342,6 +345,7 @@ func run(url string) error {
 	url = buffers[currentBufferIdx].current.url
 	doc = buffers[currentBufferIdx].current.doc
 	scrollY := buffers[currentBufferIdx].current.scrollY
+	currentHTML = buffers[currentBufferIdx].current.html
 
 	// Helper to get current buffer
 	getCurrentBuffer := func() *buffer {
@@ -382,7 +386,6 @@ func run(url string) error {
 	linkScrollOffset := 0             // scroll position within link index
 	bufferMode := false               // showing buffer list overlay
 	bufferScrollOffset := 0           // scroll position within buffer list
-	urlMode := false                  // entering a URL
 	omniMode := false                 // omnibox mode (unified URL + search)
 	findMode := false                 // find in page mode
 	findInput := ""                   // current find query
@@ -417,7 +420,6 @@ func run(url string) error {
 	var navLinks []document.NavLink       // current navigation links in overlay
 	var activeInput *document.Input       // currently selected input
 	var enteredText string                // text being entered
-	var urlInput string                   // URL being entered
 	var omniInput string                  // omnibox input being entered
 	var structureViewer *inspector.Viewer // DOM structure viewer
 	chatEditor := lineedit.New()          // chat input editor (for ai:// pages)
@@ -670,12 +672,18 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		if u == "" || u == "browse://home" {
 			return "browse://home"
 		}
-		// Parse the URL to get the host
-		parsed, err := neturl.Parse(u)
-		if err != nil {
+		// For web URLs, show the host. For internal/non-web schemes, show the full URL.
+		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+			parsed, err := neturl.Parse(u)
+			if err != nil {
+				return u
+			}
+			return parsed.Host
+		}
+		if strings.Contains(u, "://") {
 			return u
 		}
-		return parsed.Host
+		return u
 	}
 
 	// Render canvas to screen with theme colors
@@ -1209,46 +1217,6 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 			canvas.WriteString(0, height-1, prompt, render.Style{Reverse: true, Bold: true})
 		}
-		if urlMode {
-			canvas.DimAll()
-			// Draw URL input as centered overlay box (like TOC)
-			boxWidth := 50
-			if boxWidth > width-4 {
-				boxWidth = width - 4
-			}
-			boxHeight := 5
-			startX := (width - boxWidth) / 2
-			startY := (height - boxHeight) / 2
-
-			// Clear box area
-			for y := startY; y < startY+boxHeight; y++ {
-				for x := startX; x < startX+boxWidth; x++ {
-					canvas.Set(x, y, ' ', render.Style{})
-				}
-			}
-
-			// Draw border
-			canvas.DrawBox(startX, startY, boxWidth, boxHeight, render.DoubleBox, render.Style{})
-
-			// Title
-			title := " Open URL "
-			titleX := startX + (boxWidth-len(title))/2
-			canvas.WriteString(titleX, startY, title, render.Style{Bold: true})
-
-			// URL input field
-			inputY := startY + 2
-			maxURLWidth := boxWidth - 4
-			displayURL := urlInput
-			if len(displayURL) > maxURLWidth-1 {
-				displayURL = displayURL[len(displayURL)-maxURLWidth+1:]
-			}
-			canvas.WriteString(startX+2, inputY, displayURL+"█", render.Style{})
-
-			// Hint
-			hint := " Enter to go, ESC to cancel "
-			hintX := startX + (boxWidth-len(hint))/2
-			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
-		}
 		if findMode {
 			// Draw find bar at bottom of screen
 			findBarY := height - 1
@@ -1335,7 +1303,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 
 			// Prefix hints - dim the matched one
-			prefixHint := "ai  gh  hn  go  arch  mdn  man  dict  wp"
+			prefixHint := "help  rss  ai  gh  hn  go  arch  mdn  man  dict  wp"
 			if matchedDisplay != "" {
 				prefixHint = "Searching " + matchedDisplay
 			}
@@ -1422,6 +1390,16 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 							rssDoc, err := handleRSSURL(rssStore, newURL)
 							if err == nil {
 								navigateTo(newURL, rssDoc, "")
+							}
+							redraw()
+							break
+						}
+
+						// Internal browse:// pages
+						if strings.HasPrefix(newURL, "browse://") {
+							browseDoc, browseHTML, err := handleBrowseURL(newURL, favStore)
+							if err == nil && browseDoc != nil {
+								navigateTo(newURL, browseDoc, browseHTML)
 							}
 							redraw()
 							break
@@ -1891,6 +1869,33 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						navScrollOffset = 0
 
 						newURL := resolveURL(url, navLinks[actualIdx].Href)
+						// Check if this is an RSS URL
+						if strings.HasPrefix(newURL, "rss://") {
+							rssDoc, err := handleRSSURL(rssStore, newURL)
+							if err == nil {
+								navigateTo(newURL, rssDoc, "")
+							}
+							redraw()
+							break
+						}
+
+						// Internal browse:// pages
+						if strings.HasPrefix(newURL, "browse://") {
+							browseDoc, browseHTML, err := handleBrowseURL(newURL, favStore)
+							if err == nil && browseDoc != nil {
+								navigateTo(newURL, browseDoc, browseHTML)
+							}
+							redraw()
+							break
+						}
+
+						// Mark RSS item as read when navigating from RSS page to article
+						if strings.HasPrefix(url, "rss://") && rssStore != nil {
+							if rssStore.MarkReadByLink(newURL) {
+								rssStore.Save()
+							}
+						}
+
 						// Check if this is a same-page anchor link
 						if isSamePageLink(url, newURL) {
 							hash := extractHash(newURL)
@@ -1988,6 +1993,33 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						linkScrollOffset = 0
 
 						newURL := resolveURL(url, links[actualIdx].Href)
+						// Check if this is an RSS URL
+						if strings.HasPrefix(newURL, "rss://") {
+							rssDoc, err := handleRSSURL(rssStore, newURL)
+							if err == nil {
+								navigateTo(newURL, rssDoc, "")
+							}
+							redraw()
+							break
+						}
+
+						// Internal browse:// pages
+						if strings.HasPrefix(newURL, "browse://") {
+							browseDoc, browseHTML, err := handleBrowseURL(newURL, favStore)
+							if err == nil && browseDoc != nil {
+								navigateTo(newURL, browseDoc, browseHTML)
+							}
+							redraw()
+							break
+						}
+
+						// Mark RSS item as read when navigating from RSS page to article
+						if strings.HasPrefix(url, "rss://") && rssStore != nil {
+							if rssStore.MarkReadByLink(newURL) {
+								rssStore.Save()
+							}
+						}
+
 						// Check if this is a same-page anchor link
 						if isSamePageLink(url, newURL) {
 							hash := extractHash(newURL)
@@ -2316,56 +2348,6 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			continue
 		}
 
-		// URL input mode handling
-		if urlMode {
-			switch {
-			case buf[0] == 27: // Escape - cancel URL mode
-				urlMode = false
-				urlInput = ""
-				redraw()
-
-			case buf[0] == 13 || buf[0] == 10: // Enter - navigate to URL
-				if urlInput != "" {
-					// Add https:// if no scheme provided
-					targetURL := urlInput
-					if !strings.Contains(targetURL, "://") {
-						targetURL = "https://" + targetURL
-					}
-
-					urlMode = false
-					urlInput = ""
-					loading = true
-					newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, targetURL, ruleCache)
-					loading = false
-					if err == nil {
-						navigateTo(finalURL, newDoc, htmlContent)
-						// Handle hash/anchor in URL
-						if hash := extractHash(finalURL); hash != "" {
-							if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
-								scrollY = anchorY
-								if scrollY > maxScroll {
-									scrollY = maxScroll
-								}
-								getCurrentBuffer().current.scrollY = scrollY
-							}
-						}
-					}
-					redraw()
-				}
-
-			case buf[0] == 127 || buf[0] == 8: // Backspace
-				if len(urlInput) > 0 {
-					urlInput = urlInput[:len(urlInput)-1]
-					redraw()
-				}
-
-			case buf[0] >= 32 && buf[0] < 127: // Printable ASCII
-				urlInput += string(buf[0])
-				redraw()
-			}
-			continue
-		}
-
 		// Find in page mode input handling
 		if findMode {
 			switch {
@@ -2509,19 +2491,32 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 						}
 					} else if result.URL != "" {
 						// Direct URL or prefixed search URL
-						loading = true
-						newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
-						loading = false
-						if err == nil {
-							navigateTo(finalURL, newDoc, htmlContent)
-							// Handle hash/anchor in URL
-							if hash := extractHash(finalURL); hash != "" {
-								if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
-									scrollY = anchorY
-									if scrollY > maxScroll {
-										scrollY = maxScroll
+						switch {
+						case strings.HasPrefix(result.URL, "browse://"):
+							browseDoc, browseHTML, err := handleBrowseURL(result.URL, favStore)
+							if err == nil && browseDoc != nil {
+								navigateTo(result.URL, browseDoc, browseHTML)
+							}
+						case strings.HasPrefix(result.URL, "rss://"):
+							rssDoc, err := handleRSSURL(rssStore, result.URL)
+							if err == nil && rssDoc != nil {
+								navigateTo(result.URL, rssDoc, "")
+							}
+						default:
+							loading = true
+							newDoc, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
+							loading = false
+							if err == nil {
+								navigateTo(result.URL, newDoc, htmlContent)
+								// Handle hash/anchor in URL
+								if hash := extractHash(result.URL); hash != "" {
+									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+										scrollY = anchorY
+										if scrollY > maxScroll {
+											scrollY = maxScroll
+										}
+										getCurrentBuffer().current.scrollY = scrollY
 									}
-									getCurrentBuffer().current.scrollY = scrollY
 								}
 							}
 						}
@@ -2693,7 +2688,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 		case keyG(buf[0], kb.Refresh): // gr - refresh current page
 			gPending = false
-			if url != "" && url != "browse://home" && !strings.HasPrefix(url, "dict://") && !strings.HasPrefix(url, "rss://") {
+			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 				go func(targetURL string) {
 					loading = true
 					redraw()
@@ -2802,14 +2797,13 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				buf.forward = buf.forward[:len(buf.forward)-1]
 				// Fetch page if doc is nil (restored from session)
 				if buf.current.doc == nil {
-					if buf.current.url == "browse://home" {
-						buf.current.doc, _ = landingPage(favStore)
-					} else {
-						var finalURL string
-						buf.current.doc, finalURL, _ = fetchAndParse(buf.current.url)
-						if finalURL != "" {
-							buf.current.url = finalURL
-						}
+					switch {
+					case buf.current.url == "" || strings.HasPrefix(buf.current.url, "browse://"):
+						buf.current.doc, buf.current.html, _ = handleBrowseURL(buf.current.url, favStore)
+					case strings.HasPrefix(buf.current.url, "rss://"):
+						buf.current.doc, _ = handleRSSURL(rssStore, buf.current.url)
+					default:
+						buf.current.doc, _ = fetchAndParse(buf.current.url)
 					}
 				}
 				// Update local state
@@ -3205,14 +3199,13 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				buf.history = buf.history[:len(buf.history)-1]
 				// Fetch page if doc is nil (restored from session)
 				if buf.current.doc == nil {
-					if buf.current.url == "browse://home" {
-						buf.current.doc, _ = landingPage(favStore)
-					} else {
-						var finalURL string
-						buf.current.doc, finalURL, _ = fetchAndParse(buf.current.url)
-						if finalURL != "" {
-							buf.current.url = finalURL
-						}
+					switch {
+					case buf.current.url == "" || strings.HasPrefix(buf.current.url, "browse://"):
+						buf.current.doc, buf.current.html, _ = handleBrowseURL(buf.current.url, favStore)
+					case strings.HasPrefix(buf.current.url, "rss://"):
+						buf.current.doc, _ = handleRSSURL(rssStore, buf.current.url)
+					default:
+						buf.current.doc, _ = fetchAndParse(buf.current.url)
 					}
 				}
 				// Update local state
@@ -3231,6 +3224,14 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				redraw()
 			}
 
+		case key(buf[0], kb.Help): // help
+			gPending = false
+			helpDoc, helpHTML, err := helpPage()
+			if err == nil && helpDoc != nil {
+				navigateTo("browse://help", helpDoc, helpHTML)
+				redraw()
+			}
+
 		case key(buf[0], kb.Home): // home
 			homeDoc, err := landingPage(favStore)
 			if err == nil {
@@ -3239,7 +3240,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 
 		case key(buf[0], kb.ReloadWithJs): // reload with browser (JS rendering)
-			if url != "" && url != "browse://home" {
+			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 				newDoc, err := fetchBrowserWithSpinner(canvas, url)
 				if err == nil {
 					doc = newDoc
@@ -3254,7 +3255,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 
 		case key(buf[0], kb.TranslatePage): // Translate page to English
-			if doc != nil && url != "browse://home" {
+			if doc != nil && (strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")) {
 				// Show translating message
 				canvas.DimAll()
 				msg := " Translating... "
@@ -3309,7 +3310,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			}
 
 		case key(buf[0], kb.GenerateRules): // Generate AI rules for current site
-			if url != "" && url != "browse://home" && llmClient.Available() {
+			if (strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")) && llmClient.Available() {
 				domain := getDomain(url)
 				providerName := "AI"
 				if p := llmClient.Provider(); p != nil {
@@ -3398,11 +3399,6 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 				redraw()
 			}
 
-		case key(buf[0], kb.OpenUrl) && !gPending: // open URL
-			urlMode = true
-			urlInput = ""
-			redraw()
-
 		case key(buf[0], kb.Find): // find in page
 			findMode = true
 			findInput = ""
@@ -3410,7 +3406,8 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			findCurrentIdx = 0
 			redraw()
 
-		case key(buf[0], kb.Omnibox): // omnibox (unified URL + search)
+		case key(buf[0], kb.Omnibox) || (key(buf[0], kb.OpenUrl) && !gPending): // omnibox (unified URL + search)
+			gPending = false
 			omniMode = true
 			omniInput = ""
 			redraw()
@@ -3628,7 +3625,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 		case keyG(buf[0], kb.OpenInBrowser): // go - open in default browser
 			gPending = false
-			if url != "" && url != "browse://home" {
+			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 				if err := openInBrowser(url); err == nil {
 					// Brief feedback
 					canvas.Clear()
@@ -4415,6 +4412,8 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <article>
 <h1>Browse</h1>
 <p>A terminal-based web browser for reading the web in beautiful monospace.</p>
+<p><strong>?</strong> Help &amp; quickstart &mdash; <a href="browse://help">browse://help</a></p>
+<p><strong>Ctrl+L</strong> Omnibox (URL, search, AI)</p>
 
 <h2>Link Compatibility</h2>
 <p>Links are marked with compatibility indicators based on how well the site renders in a text browser:</p>
@@ -4433,8 +4432,8 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <tr><td><strong>gg/G</strong></td><td>Go to top/bottom</td></tr>
 <tr><td><strong>[/]</strong></td><td>Prev/next paragraph (focus mode)</td></tr>
 <tr><td><strong>{/}</strong></td><td>Prev/next section</td></tr>
-<tr><td><strong>o</strong></td><td>Open URL</td></tr>
-<tr><td><strong>/</strong></td><td>Web search</td></tr>
+<tr><td><strong>Ctrl+L</strong></td><td>Omnibox (URL, search, AI)</td></tr>
+<tr><td><strong>/</strong></td><td>Find in page</td></tr>
 <tr><td><strong>y</strong></td><td>Copy URL to clipboard</td></tr>
 <tr><td><strong>f</strong></td><td>Follow link</td></tr>
 <tr><td><strong>go</strong></td><td>Open in default browser</td></tr>
@@ -4443,7 +4442,7 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <tr><td><strong>n</strong></td><td>Site navigation</td></tr>
 <tr><td><strong>l</strong></td><td>Link index</td></tr>
 <tr><td><strong>s</strong></td><td>Structure inspector</td></tr>
-<tr><td><strong>b/B</strong></td><td>Back/forward in history</td></tr>
+<tr><td><strong>Ctrl+O/Tab</strong></td><td>Back/forward in history</td></tr>
 <tr><td><strong>T</strong></td><td>New buffer</td></tr>
 <tr><td><strong>gt/gT</strong></td><td>Next/prev buffer</td></tr>
 <tr><td><strong>&#96;</strong></td><td>Buffer list</td></tr>
@@ -4451,6 +4450,7 @@ func landingPage(favStore *favourites.Store) (*html.Document, error) {
 <tr><td><strong>'</strong></td><td>Favourites list</td></tr>
 <tr><td><strong>F</strong></td><td>RSS feeds</td></tr>
 <tr><td><strong>H</strong></td><td>Home</td></tr>
+<tr><td><strong>?</strong></td><td>Help &amp; quickstart</td></tr>
 <tr><td><strong>w</strong></td><td>Toggle wide mode</td></tr>
 <tr><td><strong>i</strong></td><td>Focus input field</td></tr>
 <tr><td><strong>r</strong></td><td>Reload with JavaScript</td></tr>
@@ -4606,6 +4606,102 @@ func rssPage(rssStore *rss.Store) (*html.Document, error) {
 </html>`
 
 	return html.ParseString(page)
+}
+
+func helpPage() (*html.Document, string, error) {
+	page := `<!DOCTYPE html>
+<html>
+<head><title>Browse - Help</title></head>
+<body>
+<article>
+<h1>Help &amp; Quickstart</h1>
+<p><a href="browse://home">← Home</a></p>
+
+<h2>Start Here</h2>
+<ul>
+<li><strong>Ctrl+L</strong> omnibox (URL, search, AI)</li>
+<li><strong>j/k</strong> scroll</li>
+<li><strong>d/u</strong> half page down/up</li>
+<li><strong>gg/G</strong> top/bottom</li>
+<li><strong>[/]</strong> prev/next paragraph (focus mode)</li>
+<li><strong>{/}</strong> prev/next section</li>
+<li><strong>Ctrl+O/Tab</strong> back/forward</li>
+<li><strong>gr</strong> refresh current page</li>
+<li><strong>/</strong> find in page (then <strong>n/N</strong> next/prev)</li>
+<li><strong>f</strong> follow link (labels appear)</li>
+<li><strong>t</strong> table of contents</li>
+<li><strong>n</strong> site navigation</li>
+<li><strong>l</strong> link index</li>
+<li><strong>H</strong> home</li>
+<li><strong>q</strong> quit</li>
+</ul>
+
+<h2>Buffers &amp; Lists</h2>
+<ul>
+<li><strong>T</strong> new buffer</li>
+<li><strong>gt/gT</strong> next/prev buffer</li>
+<li><strong>&#96;</strong> buffer list</li>
+<li><strong>M</strong> add favourite, <strong>'</strong> favourites list</li>
+<li><strong>F</strong> RSS feeds, <strong>A</strong> subscribe, <strong>x</strong> unsubscribe, <strong>gf</strong> refresh all feeds</li>
+</ul>
+
+<h2>Features You Might Miss</h2>
+<ul>
+<li><strong>F</strong> RSS reader (<a href="rss://">rss://</a>)</li>
+<li><strong>S</strong> AI summary (starts a chat)</li>
+<li><strong>X</strong> translate page to English</li>
+<li><strong>D</strong> define a word (type to filter, Enter to look up)</li>
+<li><strong>s</strong> DOM structure inspector</li>
+<li><strong>r</strong> reload with JavaScript (headless Chrome)</li>
+<li><strong>z</strong> toggle light/dark theme</li>
+<li><strong>P</strong> theme picker</li>
+</ul>
+
+<h2>Omnibox</h2>
+<p>Press <strong>Ctrl+L</strong> to open the omnibox. Try:</p>
+<ul>
+<li><strong>help</strong> &mdash; open help</li>
+<li><strong>rss</strong> &mdash; open RSS reader</li>
+<li><strong>gh query</strong> or <strong>gh:query</strong> &mdash; GitHub</li>
+<li><strong>hn query</strong> or <strong>hn:query</strong> &mdash; Hacker News</li>
+<li><strong>wp query</strong> or <strong>wp:query</strong> &mdash; Wikipedia</li>
+<li><strong>dict word</strong> or <strong>dict:word</strong> &mdash; Dictionary</li>
+<li><strong>ai</strong> &mdash; summarize this page</li>
+<li><strong>ai:question</strong> &mdash; custom summary prompt</li>
+</ul>
+
+<h2>Config</h2>
+<p>Press <strong>C</strong> to edit config and hot-reload.</p>
+</article>
+</body>
+</html>`
+
+	doc, err := html.ParseString(page)
+	return doc, page, err
+}
+
+func handleBrowseURL(targetURL string, favStore *favourites.Store) (*html.Document, string, error) {
+	switch targetURL {
+	case "", "browse://", "browse://home":
+		doc, err := landingPage(favStore)
+		return doc, "", err
+	case "browse://help":
+		return helpPage()
+	default:
+		page := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Browse - Not Found</title></head>
+<body>
+<article>
+<h1>Page Not Found</h1>
+<p>No internal page exists at <strong>%s</strong>.</p>
+<p><a href="browse://home">← Home</a></p>
+</article>
+</body>
+</html>`, targetURL)
+		doc, err := html.ParseString(page)
+		return doc, page, err
+	}
 }
 
 // rssItemsPage renders a list of RSS items (for rss://all, rss://unread, or rss://feed/<url>)
