@@ -279,7 +279,11 @@ func run(url string) error {
 				} else if strings.HasPrefix(pageURL, "rss://") {
 					pageDoc, _ = handleRSSURL(rssStore, pageURL)
 				} else {
-					pageDoc, _ = fetchAndParse(pageURL)
+					var finalURL string
+					pageDoc, finalURL, _ = fetchAndParse(pageURL)
+					if finalURL != "" {
+						pageURL = finalURL // Use final URL after redirects
+					}
 				}
 				if pageDoc != nil {
 					b := buffer{
@@ -320,7 +324,11 @@ func run(url string) error {
 			doc, err = landingPage(favStore)
 			url = "browse://home"
 		} else {
-			doc, err = fetchAndParse(url)
+			var finalURL string
+			doc, finalURL, err = fetchAndParse(url)
+			if finalURL != "" {
+				url = finalURL // Use final URL after redirects
+			}
 		}
 		if err != nil {
 			return err
@@ -1439,12 +1447,12 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 							}
 						} else {
 							loading = true
-							newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
+							newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 							loading = false
 							if err == nil {
-								navigateTo(newURL, newDoc, htmlContent)
+								navigateTo(finalURL, newDoc, htmlContent)
 								// After navigating, check for hash and scroll to anchor
-								if hash := extractHash(newURL); hash != "" {
+								if hash := extractHash(finalURL); hash != "" {
 									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
 										scrollY = anchorY
 										if scrollY > maxScroll {
@@ -1605,7 +1613,11 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					histBuf.current = histBuf.history[len(histBuf.history)-1]
 					histBuf.history = histBuf.history[:len(histBuf.history)-1]
 					if histBuf.current.doc == nil {
-						histBuf.current.doc, _ = fetchAndParse(histBuf.current.url)
+						var finalURL string
+						histBuf.current.doc, finalURL, _ = fetchAndParse(histBuf.current.url)
+						if finalURL != "" {
+							histBuf.current.url = finalURL
+						}
 					}
 					doc = histBuf.current.doc
 					url = histBuf.current.url
@@ -1760,9 +1772,9 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					enteredText = ""
 
 					// Navigate to the form result
-					newDoc, htmlContent, err := fetchWithSpinner(canvas, formURL, ruleCache)
+					newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, formURL, ruleCache)
 					if err == nil {
-						navigateTo(formURL, newDoc, htmlContent)
+						navigateTo(finalURL, newDoc, htmlContent)
 					}
 				}
 				redraw()
@@ -1892,12 +1904,12 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 							}
 						} else {
 							loading = true
-							newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
+							newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 							loading = false
 							if err == nil {
-								navigateTo(newURL, newDoc, htmlContent)
+								navigateTo(finalURL, newDoc, htmlContent)
 								// After navigating, check for hash and scroll to anchor
-								if hash := extractHash(newURL); hash != "" {
+								if hash := extractHash(finalURL); hash != "" {
 									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
 										scrollY = anchorY
 										if scrollY > maxScroll {
@@ -1989,12 +2001,12 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 							}
 						} else {
 							loading = true
-							newDoc, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
+							newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, newURL, ruleCache)
 							loading = false
 							if err == nil {
-								navigateTo(newURL, newDoc, htmlContent)
+								navigateTo(finalURL, newDoc, htmlContent)
 								// After navigating, check for hash and scroll to anchor
-								if hash := extractHash(newURL); hash != "" {
+								if hash := extractHash(finalURL); hash != "" {
 									if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
 										scrollY = anchorY
 										if scrollY > maxScroll {
@@ -2323,12 +2335,12 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					urlMode = false
 					urlInput = ""
 					loading = true
-					newDoc, htmlContent, err := fetchWithSpinner(canvas, targetURL, ruleCache)
+					newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, targetURL, ruleCache)
 					loading = false
 					if err == nil {
-						navigateTo(targetURL, newDoc, htmlContent)
+						navigateTo(finalURL, newDoc, htmlContent)
 						// Handle hash/anchor in URL
-						if hash := extractHash(targetURL); hash != "" {
+						if hash := extractHash(finalURL); hash != "" {
 							if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
 								scrollY = anchorY
 								if scrollY > maxScroll {
@@ -2498,12 +2510,12 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					} else if result.URL != "" {
 						// Direct URL or prefixed search URL
 						loading = true
-						newDoc, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
+						newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
 						loading = false
 						if err == nil {
-							navigateTo(result.URL, newDoc, htmlContent)
+							navigateTo(finalURL, newDoc, htmlContent)
 							// Handle hash/anchor in URL
-							if hash := extractHash(result.URL); hash != "" {
+							if hash := extractHash(finalURL); hash != "" {
 								if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
 									scrollY = anchorY
 									if scrollY > maxScroll {
@@ -2793,7 +2805,11 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					if buf.current.url == "browse://home" {
 						buf.current.doc, _ = landingPage(favStore)
 					} else {
-						buf.current.doc, _ = fetchAndParse(buf.current.url)
+						var finalURL string
+						buf.current.doc, finalURL, _ = fetchAndParse(buf.current.url)
+						if finalURL != "" {
+							buf.current.url = finalURL
+						}
 					}
 				}
 				// Update local state
@@ -3192,7 +3208,11 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					if buf.current.url == "browse://home" {
 						buf.current.doc, _ = landingPage(favStore)
 					} else {
-						buf.current.doc, _ = fetchAndParse(buf.current.url)
+						var finalURL string
+						buf.current.doc, finalURL, _ = fetchAndParse(buf.current.url)
+						if finalURL != "" {
+							buf.current.url = finalURL
+						}
 					}
 				}
 				// Update local state
@@ -3298,7 +3318,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 
 				// Fetch fresh HTML if we don't have it
 				if currentHTML == "" {
-					_, htmlContent, err := fetchWithSpinner(canvas, url, ruleCache)
+					_, _, htmlContent, err := fetchWithSpinner(canvas, url, ruleCache)
 					if err == nil {
 						currentHTML = htmlContent
 					}
@@ -3784,15 +3804,15 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 	}
 }
 
-func fetchAndParse(url string) (*html.Document, error) {
+func fetchAndParse(targetURL string) (*html.Document, string, error) {
 	// Start spinner in background
 	done := make(chan bool)
 	go showSpinner(done)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
 		done <- true
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, "", fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("User-Agent", fetcher.UserAgent())
 
@@ -3800,34 +3820,37 @@ func fetchAndParse(url string) (*html.Document, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		done <- true
-		return nil, fmt.Errorf("fetching %s: %w", url, err)
+		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
 	}
 	defer resp.Body.Close()
+
+	// Capture final URL after redirects
+	finalURL := resp.Request.URL.String()
 
 	body, err := io.ReadAll(resp.Body)
 	done <- true
 	if err != nil {
-		return nil, fmt.Errorf("reading body: %w", err)
+		return nil, "", fmt.Errorf("reading body: %w", err)
 	}
 
 	htmlContent := string(body)
 
 	// Check for site-specific handlers (HN, etc.)
-	if doc, _ := sites.ParseForURL(url, htmlContent); doc != nil {
+	if doc, _ := sites.ParseForURL(finalURL, htmlContent); doc != nil {
 		// Extract and set theme color for site-specific handlers
 		if doc.ThemeColor == "" {
 			doc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
 		}
-		return doc, nil
+		return doc, finalURL, nil
 	}
 
 	// Default HTML parser
 	doc, err := html.ParseString(htmlContent)
 	if err != nil {
-		return nil, fmt.Errorf("parsing HTML: %w", err)
+		return nil, "", fmt.Errorf("parsing HTML: %w", err)
 	}
 
-	return doc, nil
+	return doc, finalURL, nil
 }
 
 func fetchWithBrowser(targetURL string) (*html.Document, error) {
@@ -3990,15 +4013,17 @@ func fetchQuietWithHTML(targetURL string) (*html.Document, string, error) {
 }
 
 // fetchWithRules fetches and parses, applying cached rules if available.
-func fetchWithRules(targetURL string, cache *rules.Cache) (*html.Document, string, error) {
+// Returns (doc, finalURL, htmlContent, error) where finalURL is the URL after redirects.
+func fetchWithRules(targetURL string, cache *rules.Cache) (*html.Document, string, string, error) {
 	return fetchWithRulesCtx(context.Background(), targetURL, cache)
 }
 
 // fetchWithRulesCtx fetches and parses with context for cancellation.
-func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache) (*html.Document, string, error) {
+// Returns (doc, finalURL, htmlContent, error) where finalURL is the URL after redirects.
+func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache) (*html.Document, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("creating request: %w", err)
+		return nil, "", "", fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("User-Agent", fetcher.UserAgent())
 
@@ -4006,18 +4031,21 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, "", ErrCancelled
+			return nil, "", "", ErrCancelled
 		}
-		return nil, "", fmt.Errorf("fetching %s: %w", targetURL, err)
+		return nil, "", "", fmt.Errorf("fetching %s: %w", targetURL, err)
 	}
 	defer resp.Body.Close()
+
+	// Capture final URL after any redirects
+	finalURL := resp.Request.URL.String()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, "", ErrCancelled
+			return nil, "", "", ErrCancelled
 		}
-		return nil, "", fmt.Errorf("reading body: %w", err)
+		return nil, "", "", fmt.Errorf("reading body: %w", err)
 	}
 
 	htmlContent := string(body)
@@ -4028,29 +4056,33 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 		result, browserErr := fetcher.WithBrowser(targetURL)
 		if browserErr == nil && result != nil && !isBotProtectionPage(result.HTML) {
 			htmlContent = result.HTML
+			// Use browser's final URL if available
+			if result.FinalURL != "" {
+				finalURL = result.FinalURL
+			}
 		} else {
 			// Browser fetch also failed - return a helpful message
-			return createBotProtectionDoc(targetURL), htmlContent, nil
+			return createBotProtectionDoc(targetURL), finalURL, htmlContent, nil
 		}
 	}
 
 	// Check for site-specific handlers (HN, etc.) - they register via init()
-	if doc, _ := sites.ParseForURL(targetURL, htmlContent); doc != nil {
+	if doc, _ := sites.ParseForURL(finalURL, htmlContent); doc != nil {
 		if doc.ThemeColor == "" {
 			doc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
 		}
-		return doc, htmlContent, nil
+		return doc, finalURL, htmlContent, nil
 	}
 
 	// Default HTML parser
 	defaultDoc, err := html.ParseString(htmlContent)
 	if err != nil {
-		return nil, "", fmt.Errorf("parsing HTML: %w", err)
+		return nil, "", "", fmt.Errorf("parsing HTML: %w", err)
 	}
 
 	// Try to apply cached rules and compare quality
 	if cache != nil {
-		if rule := cache.GetForURL(targetURL); rule != nil {
+		if rule := cache.GetForURL(finalURL); rule != nil {
 			if result := rules.Apply(rule, htmlContent); result != nil {
 				if rulesDoc := html.FromRules(result); rulesDoc != nil {
 					// Only use rules if they produce better quality output
@@ -4059,14 +4091,14 @@ func fetchWithRulesCtx(ctx context.Context, targetURL string, cache *rules.Cache
 						if rulesDoc.ThemeColor == "" {
 							rulesDoc.ThemeColor = html.ExtractThemeColorFromHTML(htmlContent)
 						}
-						return rulesDoc, htmlContent, nil
+						return rulesDoc, finalURL, htmlContent, nil
 					}
 				}
 			}
 		}
 	}
 
-	return defaultDoc, htmlContent, nil
+	return defaultDoc, finalURL, htmlContent, nil
 }
 
 // createBotProtectionDoc creates a document explaining the bot protection issue.
@@ -4767,19 +4799,21 @@ func withSpinner[T any](canvas *render.Canvas, message string, work func(ctx con
 
 // fetchResult holds the result of a fetch operation.
 type fetchResult struct {
-	doc     *html.Document
-	content string
-	err     error
+	doc      *html.Document
+	finalURL string
+	content  string
+	err      error
 }
 
 // fetchWithSpinner fetches a URL while showing an animated spinner.
 // Cancellable with Escape key.
-func fetchWithSpinner(canvas *render.Canvas, targetURL string, ruleCache *rules.Cache) (*html.Document, string, error) {
+// Returns (doc, finalURL, htmlContent, error) where finalURL is the URL after redirects.
+func fetchWithSpinner(canvas *render.Canvas, targetURL string, ruleCache *rules.Cache) (*html.Document, string, string, error) {
 	result := withSpinner(canvas, targetURL, func(ctx context.Context) fetchResult {
-		doc, content, err := fetchWithRulesCtx(ctx, targetURL, ruleCache)
-		return fetchResult{doc, content, err}
+		doc, finalURL, content, err := fetchWithRulesCtx(ctx, targetURL, ruleCache)
+		return fetchResult{doc, finalURL, content, err}
 	})
-	return result.doc, result.content, result.err
+	return result.doc, result.finalURL, result.content, result.err
 }
 
 // browserResult holds the result of a browser fetch operation.

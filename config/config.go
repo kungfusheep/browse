@@ -419,8 +419,8 @@ siteNavigation = "n"
 linkIndex = "l"
 
 # History & Buffers
-back = "b"
-forward = "B"
+back = "\u000f"               # Ctrl-o (vim jump list style)
+forward = "\t"                # Ctrl-i / Tab (vim jump list style)
 refresh = "gr"                # Reload current page
 newBuffer = "T"
 nextBuffer = "gt"
@@ -438,7 +438,7 @@ rssUnsubscribe = "x"          # Unsubscribe from feed
 rssRefresh = "gf"             # Refresh all feeds
 
 # Other
-omnibox = "\x0c"              # Ctrl-l (browser-style address bar)
+omnibox = "\u000c"            # Ctrl-l (browser-style address bar)
 home = "H"
 structureInspector = "s"
 toggleWideMode = "w"
