@@ -26,6 +26,7 @@ import (
 	"browse/lineedit"
 	"browse/llm"
 	"browse/omnibox"
+	"browse/preview"
 	"browse/render"
 	"browse/rss"
 	"browse/rules"
@@ -330,7 +331,7 @@ func run(url string) error {
 		case strings.HasPrefix(url, "browse://"):
 			doc, pageHTML, err = handleBrowseURL(url, favStore)
 		default:
-			doc, err = fetchAndParse(url)
+			doc, pageHTML, err = fetchAndParse(url)
 		}
 		if err != nil {
 			return err
@@ -400,6 +401,17 @@ func run(url string) error {
 	defineUniqueWords := []string{}                   // unique matching word texts (for labels)
 	defineWordPositions := map[string][]render.Word{} // word text -> all its positions
 	gPending := false                                 // waiting for second key after 'g'
+
+	// Preview mode state - preview link metadata before navigating
+	previewMode := false                         // K pressed, showing labels
+	previewInput := ""                           // accumulated label input
+	previewActive := false                       // preview box visible
+	var previewLink *document.Link               // which link we're previewing
+	var previewMeta *preview.Meta                // fetched metadata (nil = loading)
+	var previewMetaChan chan *preview.Meta       // channel for async fetch
+	var previewSpinnerStop chan struct{}         // stop spinner animation
+	var previewSpinner *render.Spinner           // reusable spinner for animation
+	previewFetcher := preview.NewFetcher(cfg.Fetcher.UserAgent)
 
 	// Focus mode state - dims non-focused paragraphs for easier reading
 	focusModeActive := false // is focus mode currently active?
@@ -797,6 +809,10 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 		if jumpMode {
 			labels = document.GenerateLabels(len(renderer.Links()))
 			renderer.RenderLinkLabels(labels, jumpInput)
+		}
+		if previewMode && !previewActive {
+			labels = document.GenerateLabels(len(renderer.Links()))
+			renderer.RenderLinkLabels(labels, previewInput)
 		}
 		if inputMode {
 			labels = document.GenerateLabels(len(renderer.Inputs()))
@@ -1321,6 +1337,155 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			canvas.WriteString(hintX, startY+boxHeight-1, hint, render.Style{Dim: true})
 		}
 
+		// Preview box - anchored near the selected link
+		if previewActive && previewLink != nil {
+			boxWidth := 50
+			if boxWidth > width-4 {
+				boxWidth = width - 4
+			}
+
+			// Build preview content
+			targetURL := resolveURL(url, previewLink.Href)
+			lines := []string{" → " + truncateURL(targetURL, boxWidth-4)}
+
+			if previewMeta == nil {
+				// Still loading - show animated wave spinner
+				if previewSpinner != nil {
+					lines = append(lines, "   "+previewSpinner.Frame())
+				} else {
+					lines = append(lines, "   ...")
+				}
+			} else if previewMeta.Error != nil {
+				lines = append(lines, "   Error: "+previewMeta.Error.Error())
+			} else {
+				// Add blank line
+				lines = append(lines, "")
+
+				// Title (quoted, wrapped if needed)
+				if previewMeta.Title != "" {
+					title := "\"" + previewMeta.Title + "\""
+					if len(title) > boxWidth-4 {
+						title = title[:boxWidth-7] + "...\""
+					}
+					lines = append(lines, " "+title)
+				}
+
+				// Description (wrapped if needed)
+				if previewMeta.Description != "" {
+					desc := previewMeta.Description
+					// Wrap to multiple lines
+					maxDescWidth := boxWidth - 4
+					for len(desc) > 0 {
+						lineLen := maxDescWidth
+						if lineLen > len(desc) {
+							lineLen = len(desc)
+						}
+						// Try to break at word boundary
+						if lineLen < len(desc) {
+							for lineLen > 0 && desc[lineLen-1] != ' ' {
+								lineLen--
+							}
+							if lineLen == 0 {
+								lineLen = maxDescWidth
+							}
+						}
+						lines = append(lines, " "+strings.TrimSpace(desc[:lineLen]))
+						desc = strings.TrimSpace(desc[lineLen:])
+						if len(lines) > 6 { // Limit description lines
+							if len(desc) > 0 {
+								lines[len(lines)-1] += "..."
+							}
+							break
+						}
+					}
+				}
+
+				// Blank line before footer
+				lines = append(lines, "")
+
+				// Footer: site/type info
+				footer := ""
+				if previewMeta.SiteName != "" {
+					footer = previewMeta.SiteName
+				}
+				if previewMeta.ContentType != "" {
+					if footer != "" {
+						footer += " · "
+					}
+					footer += previewMeta.ContentType
+				}
+				if previewMeta.Extra != "" {
+					if footer != "" {
+						footer += " · "
+					}
+					footer += previewMeta.Extra
+				}
+				if previewMeta.ReadingTime != "" {
+					if footer != "" {
+						footer += " · "
+					}
+					footer += previewMeta.ReadingTime
+				}
+				if footer != "" {
+					if len(footer) > boxWidth-4 {
+						footer = footer[:boxWidth-7] + "..."
+					}
+					lines = append(lines, " "+footer)
+				}
+			}
+
+			boxHeight := len(lines) + 2
+			if boxHeight < 4 {
+				boxHeight = 4
+			}
+			if boxHeight > height-4 {
+				boxHeight = height - 4
+			}
+
+			// Position near the link
+			boxX := previewLink.X
+			boxY := previewLink.Y + 1 // Below the link
+
+			// Adjust if would go off-screen
+			if boxX+boxWidth > width {
+				boxX = width - boxWidth - 1
+			}
+			if boxX < 0 {
+				boxX = 0
+			}
+			if boxY+boxHeight > height-1 {
+				boxY = previewLink.Y - boxHeight // Above instead
+			}
+			if boxY < 0 {
+				boxY = 0
+			}
+
+			// Clear box area
+			for by := boxY; by < boxY+boxHeight; by++ {
+				for bx := boxX; bx < boxX+boxWidth; bx++ {
+					if bx >= 0 && bx < width && by >= 0 && by < height {
+						canvas.Set(bx, by, ' ', render.Style{})
+					}
+				}
+			}
+
+			// Draw border
+			canvas.DrawBoxWithTitle(boxX, boxY, boxWidth, boxHeight, " Link ", render.SingleBox, render.Style{}, render.Style{Bold: true})
+
+			// Draw content lines
+			for i, line := range lines {
+				if i >= boxHeight-2 {
+					break
+				}
+				lineY := boxY + 1 + i
+				style := render.Style{}
+				if i == 0 {
+					style.Dim = true // URL is dimmed
+				}
+				canvas.WriteString(boxX+1, lineY, line, style)
+			}
+		}
+
 		renderToScreen()
 	}
 
@@ -1461,6 +1626,172 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					}
 					redraw() // Always redraw to show input highlighting
 				}
+			}
+			continue
+		}
+
+		// Preview mode - showing labels to select a link
+		if previewMode && !previewActive {
+			switch {
+			case buf[0] == 27: // Escape - cancel
+				previewMode = false
+				previewInput = ""
+				redraw()
+
+			case buf[0] >= 'a' && buf[0] <= 'z':
+				previewInput += string(buf[0])
+
+				// Check for exact match
+				matched := false
+				links := renderer.Links()
+				for i, label := range labels {
+					if label == previewInput && i < len(links) {
+						// Found a match - show preview for this link
+						matched = true
+						link := links[i]
+						previewLink = &link
+						previewActive = true
+						previewMeta = nil
+						previewInput = ""
+						previewSpinner = render.NewSpinner(render.SpinnerWave)
+
+						// Start async metadata fetch
+						targetURL := resolveURL(url, link.Href)
+						previewMetaChan = make(chan *preview.Meta, 1)
+						go func(fetchURL string, ch chan *preview.Meta) {
+							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+							defer cancel()
+							meta := previewFetcher.Fetch(ctx, fetchURL)
+							ch <- meta
+						}(targetURL, previewMetaChan)
+
+						// Start spinner animation and metadata polling
+						previewSpinnerStop = make(chan struct{})
+						go func(stop chan struct{}, spinner *render.Spinner, metaChan chan *preview.Meta) {
+							ticker := time.NewTicker(60 * time.Millisecond)
+							defer ticker.Stop()
+							for {
+								select {
+								case <-stop:
+									return
+								case meta := <-metaChan:
+									// Metadata arrived - update state (main goroutine handles cleanup)
+									previewMeta = meta
+									redraw()
+									return
+								case <-ticker.C:
+									spinner.Tick()
+									redraw()
+								}
+							}
+						}(previewSpinnerStop, previewSpinner, previewMetaChan)
+
+						redraw()
+						break
+					}
+				}
+
+				// If no match yet, check if input could still match something
+				if !matched {
+					couldMatch := false
+					for _, label := range labels {
+						if strings.HasPrefix(label, previewInput) {
+							couldMatch = true
+							break
+						}
+					}
+					if !couldMatch {
+						previewMode = false
+						previewInput = ""
+					}
+					redraw()
+				}
+			}
+			continue
+		}
+
+		// Preview active - preview box is showing
+		if previewActive {
+			// Check if metadata has arrived
+			select {
+			case meta := <-previewMetaChan:
+				previewMeta = meta
+				// Stop spinner animation
+				if previewSpinnerStop != nil {
+					close(previewSpinnerStop)
+					previewSpinnerStop = nil
+				}
+				redraw()
+			default:
+				// No metadata yet, continue
+			}
+
+			switch {
+			case buf[0] == 27 || key(buf[0], kb.PreviewLink): // Escape or K - dismiss
+				previewActive = false
+				previewMode = false
+				previewLink = nil
+				previewMeta = nil
+				if previewSpinnerStop != nil {
+					close(previewSpinnerStop)
+					previewSpinnerStop = nil
+				}
+				redraw()
+
+			case buf[0] == 13 || buf[0] == 10: // Enter - navigate to link
+				if previewLink != nil {
+					previewActive = false
+					previewMode = false
+					targetURL := resolveURL(url, previewLink.Href)
+					previewLink = nil
+					previewMeta = nil
+					if previewSpinnerStop != nil {
+						close(previewSpinnerStop)
+						previewSpinnerStop = nil
+					}
+
+					// Navigate (similar to jump mode navigation)
+					if strings.HasPrefix(targetURL, "rss://") {
+						rssDoc, err := handleRSSURL(rssStore, targetURL)
+						if err == nil {
+							navigateTo(targetURL, rssDoc, "")
+						}
+					} else if strings.HasPrefix(targetURL, "browse://") {
+						browseDoc, browseHTML, err := handleBrowseURL(targetURL, favStore)
+						if err == nil && browseDoc != nil {
+							navigateTo(targetURL, browseDoc, browseHTML)
+						}
+					} else {
+						loading = true
+						newDoc, finalURL, htmlContent, err := fetchWithSpinner(canvas, targetURL, ruleCache)
+						loading = false
+						if err == nil {
+							navigateTo(finalURL, newDoc, htmlContent)
+							if hash := extractHash(finalURL); hash != "" {
+								if anchorY, found := document.FindAnchorY(newDoc, hash, renderer.ContentWidth()); found {
+									scrollY = anchorY
+									if scrollY > maxScroll {
+										scrollY = maxScroll
+									}
+									getCurrentBuffer().current.scrollY = scrollY
+								}
+							}
+						}
+					}
+					redraw()
+				}
+
+			default:
+				// Any other key dismisses preview and is NOT processed further
+				previewActive = false
+				previewMode = false
+				previewLink = nil
+				previewMeta = nil
+				if previewSpinnerStop != nil {
+					close(previewSpinnerStop)
+					previewSpinnerStop = nil
+				}
+				redraw()
 			}
 			continue
 		}
@@ -2504,7 +2835,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 							}
 						default:
 							loading = true
-							newDoc, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
+							newDoc, _, htmlContent, err := fetchWithSpinner(canvas, result.URL, ruleCache)
 							loading = false
 							if err == nil {
 								navigateTo(result.URL, newDoc, htmlContent)
@@ -2656,6 +2987,14 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 			jumpInput = ""
 			redraw()
 
+		case key(buf[0], kb.PreviewLink): // preview link - enter preview label mode
+			previewMode = true
+			previewInput = ""
+			previewActive = false
+			previewLink = nil
+			previewMeta = nil
+			redraw()
+
 		case key(buf[0], kb.DefineWord): // define word - enter define mode
 			defineMode = true
 			defineFilter = ""
@@ -2803,7 +3142,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					case strings.HasPrefix(buf.current.url, "rss://"):
 						buf.current.doc, _ = handleRSSURL(rssStore, buf.current.url)
 					default:
-						buf.current.doc, _ = fetchAndParse(buf.current.url)
+						buf.current.doc, _, _ = fetchAndParse(buf.current.url)
 					}
 				}
 				// Update local state
@@ -3205,7 +3544,7 @@ User's question: %s`, sourceContent, conversationContext.String(), userMessage)
 					case strings.HasPrefix(buf.current.url, "rss://"):
 						buf.current.doc, _ = handleRSSURL(rssStore, buf.current.url)
 					default:
-						buf.current.doc, _ = fetchAndParse(buf.current.url)
+						buf.current.doc, _, _ = fetchAndParse(buf.current.url)
 					}
 				}
 				// Update local state
@@ -4309,6 +4648,19 @@ func resolveURL(base, href string) string {
 		return base + "/" + href
 	}
 	return base[:pathStart+lastSlash+1] + href
+}
+
+// truncateURL shortens a URL to fit within maxLen characters.
+func truncateURL(u string, maxLen int) string {
+	if len(u) <= maxLen {
+		return u
+	}
+	if maxLen < 10 {
+		return u[:maxLen]
+	}
+	// Show start + ... + end
+	half := (maxLen - 3) / 2
+	return u[:half] + "..." + u[len(u)-half:]
 }
 
 // urlWithoutHash returns the URL with any hash/fragment removed.

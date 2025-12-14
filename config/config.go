@@ -68,7 +68,8 @@ type Keybindings struct {
 	CopyUrl       string `json:"copyUrl"`
 	EditInEditor  string `json:"editInEditor"`
 	FollowLink    string `json:"followLink"`
-	DefineWord    string `json:"defineWord"` // look up word definition
+	PreviewLink   string `json:"previewLink"` // preview link metadata before navigating
+	DefineWord    string `json:"defineWord"`  // look up word definition
 
 	// Overlays
 	TableOfContents string `json:"tableOfContents"`
@@ -170,6 +171,7 @@ func Default() *Config {
 			CopyUrl:            "y",
 			EditInEditor:       "E",
 			FollowLink:         "f",
+			PreviewLink:        "K",
 			DefineWord:         "D",
 			TableOfContents:    "t",
 			SiteNavigation:     "n",
@@ -314,6 +316,7 @@ func merge(defaults, user *Config) *Config {
 	mergeKeybinding(&result.Keybindings.CopyUrl, user.Keybindings.CopyUrl)
 	mergeKeybinding(&result.Keybindings.EditInEditor, user.Keybindings.EditInEditor)
 	mergeKeybinding(&result.Keybindings.FollowLink, user.Keybindings.FollowLink)
+	mergeKeybinding(&result.Keybindings.PreviewLink, user.Keybindings.PreviewLink)
 	mergeKeybinding(&result.Keybindings.TableOfContents, user.Keybindings.TableOfContents)
 	mergeKeybinding(&result.Keybindings.SiteNavigation, user.Keybindings.SiteNavigation)
 	mergeKeybinding(&result.Keybindings.LinkIndex, user.Keybindings.LinkIndex)
@@ -413,6 +416,7 @@ find = "/"                    # Find in page
 copyUrl = "y"
 editInEditor = "E"
 followLink = "f"
+previewLink = "K"             # Preview link metadata before navigating
 defineWord = "D"              # Look up word definition
 
 # Overlays
