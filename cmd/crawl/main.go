@@ -29,13 +29,14 @@ import (
 
 // Config holds crawler configuration
 type Config struct {
-	DBPath         string
-	MaxDepth       int
-	MaxDomains     int
-	Concurrency    int
-	RateLimit      time.Duration
-	RequestTimeout time.Duration
-	UserAgent      string
+	DBPath            string
+	MaxDepth          int
+	MaxDomains        int
+	Concurrency       int
+	RateLimit         time.Duration
+	RequestTimeout    time.Duration
+	UserAgent         string
+	MaxSubdomains     int // Maximum subdomains to crawl per root domain
 }
 
 // Site holds information about a crawled site
@@ -58,18 +59,20 @@ type Site struct {
 
 // Crawler manages the crawling process
 type Crawler struct {
-	config     Config
-	db         *sql.DB
-	client     *http.Client
-	visited    map[string]bool
-	visitedMu  sync.RWMutex
-	queue      chan CrawlJob
-	results    chan Site
-	wg         sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
-	domainLast map[string]time.Time
-	domainMu   sync.Mutex
+	config        Config
+	db            *sql.DB
+	client        *http.Client
+	visited       map[string]bool
+	visitedMu     sync.RWMutex
+	queue         chan CrawlJob
+	results       chan Site
+	wg            sync.WaitGroup
+	ctx           context.Context
+	cancel        context.CancelFunc
+	domainLast    map[string]time.Time
+	domainMu      sync.Mutex
+	subdomainCount map[string]int // count of subdomains crawled per root domain
+	subdomainMu    sync.RWMutex
 }
 
 // CrawlJob represents a URL to crawl
@@ -81,18 +84,19 @@ type CrawlJob struct {
 
 func main() {
 	var (
-		dbPath      = flag.String("db", "crawler.db", "SQLite database path")
-		maxDepth    = flag.Int("depth", 3, "Maximum crawl depth from seeds")
-		maxDomains  = flag.Int("max", 10000, "Maximum domains to crawl")
-		concurrency = flag.Int("c", 10, "Concurrent crawlers")
-		rateLimit   = flag.Duration("rate", 2*time.Second, "Minimum time between requests to same domain")
-		timeout     = flag.Duration("timeout", 30*time.Second, "Request timeout")
-		seedFile    = flag.String("seeds", "", "File containing seed URLs (one per line)")
-		addSeed     = flag.String("add", "", "Add a single seed URL")
-		exportJSON  = flag.String("export", "", "Export high-scoring sites to JSON file")
-		exportGo    = flag.String("export-go", "", "Export known-good domains to Go source file")
-		minScore    = flag.Int("min-score", 50, "Minimum score for export")
-		stats       = flag.Bool("stats", false, "Show database statistics")
+		dbPath        = flag.String("db", "crawler.db", "SQLite database path")
+		maxDepth      = flag.Int("depth", 3, "Maximum crawl depth from seeds")
+		maxDomains    = flag.Int("max", 10000, "Maximum domains to crawl")
+		concurrency   = flag.Int("c", 10, "Concurrent crawlers")
+		rateLimit     = flag.Duration("rate", 2*time.Second, "Minimum time between requests to same domain")
+		timeout       = flag.Duration("timeout", 30*time.Second, "Request timeout")
+		maxSubdomains = flag.Int("max-subdomains", 15, "Maximum subdomains to crawl per root domain (prevents spam farms)")
+		seedFile      = flag.String("seeds", "", "File containing seed URLs (one per line)")
+		addSeed       = flag.String("add", "", "Add a single seed URL")
+		exportJSON    = flag.String("export", "", "Export high-scoring sites to JSON file")
+		exportGo      = flag.String("export-go", "", "Export known-good domains to Go source file")
+		minScore      = flag.Int("min-score", 50, "Minimum score for export")
+		stats         = flag.Bool("stats", false, "Show database statistics")
 	)
 	flag.Parse()
 
@@ -103,6 +107,7 @@ func main() {
 		Concurrency:    *concurrency,
 		RateLimit:      *rateLimit,
 		RequestTimeout: *timeout,
+		MaxSubdomains:  *maxSubdomains,
 		UserAgent:      "browse-crawler/1.0 (text-browser-catalogue; +https://github.com/anthropics/browse)",
 	}
 
@@ -235,15 +240,16 @@ func initDB(path string) (*sql.DB, error) {
 func NewCrawler(config Config, db *sql.DB) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Crawler{
-		config:     config,
-		db:         db,
-		client:     &http.Client{Timeout: config.RequestTimeout},
-		visited:    make(map[string]bool),
-		queue:      make(chan CrawlJob, 10000),
-		results:    make(chan Site, 1000),
-		ctx:        ctx,
-		cancel:     cancel,
-		domainLast: make(map[string]time.Time),
+		config:         config,
+		db:             db,
+		client:         &http.Client{Timeout: config.RequestTimeout},
+		visited:        make(map[string]bool),
+		queue:          make(chan CrawlJob, 10000),
+		results:        make(chan Site, 1000),
+		ctx:            ctx,
+		cancel:         cancel,
+		domainLast:     make(map[string]time.Time),
+		subdomainCount: make(map[string]int),
 	}
 }
 
@@ -259,8 +265,19 @@ func (c *Crawler) Run() error {
 		return fmt.Errorf("loading queue: %w", err)
 	}
 
+	// If queue is empty, try to load from discovered links
 	if len(jobs) == 0 {
-		fmt.Println("Queue is empty. Add seeds with -seeds or -add")
+		jobs, err = c.loadDiscoveredDomains(5000)
+		if err != nil {
+			return fmt.Errorf("loading discovered domains: %w", err)
+		}
+		if len(jobs) > 0 {
+			fmt.Printf("Queue empty - loaded %d discovered domains from links table\n", len(jobs))
+		}
+	}
+
+	if len(jobs) == 0 {
+		fmt.Println("No work available. Add seeds with -seeds or -add, or wait for links to be discovered.")
 		return nil
 	}
 
@@ -332,6 +349,19 @@ func (c *Crawler) crawl(job CrawlJob) {
 		return
 	}
 	c.visitedMu.RUnlock()
+
+	// Check subdomain limit to prevent spam farms
+	rootDomain := extractRootDomain(domain)
+	if c.config.MaxSubdomains > 0 && domain != rootDomain {
+		c.subdomainMu.Lock()
+		count := c.subdomainCount[rootDomain]
+		if count >= c.config.MaxSubdomains {
+			c.subdomainMu.Unlock()
+			return // Skip - too many subdomains from this root
+		}
+		c.subdomainCount[rootDomain] = count + 1
+		c.subdomainMu.Unlock()
+	}
 
 	// Mark as visited
 	c.visitedMu.Lock()
@@ -653,10 +683,10 @@ func (c *Crawler) saveSites(sites []Site) error {
 			return err
 		}
 
-		// Record links
+		// Record links (validate before inserting to keep table clean)
 		for _, link := range site.ExternalLinks {
 			toDomain := extractDomain(link)
-			if toDomain != "" && toDomain != site.Domain {
+			if toDomain != "" && toDomain != site.Domain && isValidLinkDomain(toDomain) {
 				linkStmt.Exec(site.Domain, toDomain)
 			}
 		}
@@ -678,6 +708,12 @@ func (c *Crawler) loadVisited() error {
 			return err
 		}
 		c.visited[domain] = true
+
+		// Track subdomain counts from already-crawled sites
+		rootDomain := extractRootDomain(domain)
+		if domain != rootDomain {
+			c.subdomainCount[rootDomain]++
+		}
 	}
 	return rows.Err()
 }
@@ -709,7 +745,8 @@ func (c *Crawler) loadQueue() ([]CrawlJob, error) {
 }
 
 // pollForNewSeeds checks the queue table every 30 seconds for new seeds
-// added while the crawler is running (via -add or direct SQL insert)
+// added while the crawler is running (via -add or direct SQL insert).
+// If no explicit seeds are found, it pulls uncrawled domains from the links table.
 func (c *Crawler) pollForNewSeeds() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -717,11 +754,25 @@ func (c *Crawler) pollForNewSeeds() {
 	for {
 		select {
 		case <-ticker.C:
+			// First try explicit queue
 			jobs, err := c.loadQueue()
 			if err != nil {
 				log.Printf("Error polling for new seeds: %v", err)
 				continue
 			}
+
+			// If queue is empty, pull from discovered links
+			if len(jobs) == 0 {
+				jobs, err = c.loadDiscoveredDomains(5000)
+				if err != nil {
+					log.Printf("Error loading discovered domains: %v", err)
+					continue
+				}
+				if len(jobs) > 0 {
+					log.Printf("Queue empty - loaded %d discovered domains from links table", len(jobs))
+				}
+			}
+
 			if len(jobs) == 0 {
 				continue
 			}
@@ -753,6 +804,69 @@ func (c *Crawler) pollForNewSeeds() {
 	}
 }
 
+// loadDiscoveredDomains pulls uncrawled domains from the links table
+func (c *Crawler) loadDiscoveredDomains(limit int) ([]CrawlJob, error) {
+	// Get domains that have been linked to but never crawled
+	// Use LEFT JOIN for performance (NOT IN is slow with millions of rows)
+	// Exclude known spam patterns directly in SQL for efficiency
+	rows, err := c.db.Query(`
+		SELECT DISTINCT l.to_domain FROM links l
+		LEFT JOIN sites s ON l.to_domain = s.domain
+		WHERE s.domain IS NULL
+		-- Spam farms and low-quality platforms
+		AND l.to_domain NOT LIKE '%.51dzw.com'
+		AND l.to_domain NOT LIKE '%.sxwmcc.com'
+		AND l.to_domain NOT LIKE '%.9856.cn'
+		AND l.to_domain NOT LIKE '%.softonic.%'
+		AND l.to_domain NOT LIKE '%.uptodown.%'
+		AND l.to_domain NOT LIKE '%.informer.com'
+		AND l.to_domain NOT LIKE '%.dreamwidth.org'
+		AND l.to_domain NOT LIKE '%.sikatika.com'
+		AND l.to_domain NOT LIKE '%.qowap.com'
+		AND l.to_domain NOT LIKE '%.listal.com'
+		AND l.to_domain NOT LIKE '%.insanejournal.com'
+		AND l.to_domain NOT LIKE '%.livejournal.com'
+		AND l.to_domain NOT LIKE '%.tumblr.com'
+		AND l.to_domain NOT LIKE '%.createblog.com'
+		AND l.to_domain NOT LIKE '%.blogspot.com'
+		AND l.to_domain NOT LIKE '%.wordpress.com'
+		AND l.to_domain NOT LIKE '%.mykajabi.com'
+		AND l.to_domain NOT LIKE '%.stck.me'
+		AND l.to_domain NOT LIKE '%.izrablog.com'
+		AND l.to_domain NOT LIKE '%.blogsidea.com'
+		AND l.to_domain NOT LIKE '%.blogmazing.com'
+		AND l.to_domain NOT LIKE '%.jsyinshanfu.com'
+		AND l.to_domain NOT LIKE '%.oh-hotel.%'
+		-- Suspicious TLDs
+		AND l.to_domain NOT LIKE '%.online'
+		AND l.to_domain NOT LIKE '%.click'
+		AND l.to_domain NOT LIKE '%.top'
+		AND l.to_domain NOT LIKE '%.cn'
+		-- Basic validation
+		AND LENGTH(l.to_domain) < 50
+		AND LENGTH(l.to_domain) > 5
+		AND l.to_domain GLOB '[a-z][a-z0-9-]*.[a-z]*'
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []CrawlJob
+	for rows.Next() {
+		var domain string
+		if err := rows.Scan(&domain); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, CrawlJob{
+			URL:   "https://" + domain,
+			Depth: 0,
+		})
+	}
+	return jobs, rows.Err()
+}
+
 func (c *Crawler) saveQueue() {
 	// Save unprocessed items back to queue
 	tx, _ := c.db.Begin()
@@ -767,6 +881,70 @@ func (c *Crawler) saveQueue() {
 	tx.Commit()
 }
 
+// isValidLinkDomain checks if a domain is worth storing in the links table
+func isValidLinkDomain(domain string) bool {
+	// Must have reasonable length
+	if len(domain) < 4 || len(domain) > 60 {
+		return false
+	}
+
+	// Must contain a dot
+	if !strings.Contains(domain, ".") {
+		return false
+	}
+
+	// Must start with alphanumeric
+	if len(domain) > 0 {
+		c := domain[0]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+
+	// Reject spam TLDs
+	spamTLDs := []string{".click", ".top", ".loan", ".work", ".gq", ".ml", ".cf", ".tk", ".ga", ".pw"}
+	for _, tld := range spamTLDs {
+		if strings.HasSuffix(domain, tld) {
+			return false
+		}
+	}
+
+	// Reject blog/social platforms (we don't want to crawl user subdomains)
+	spamPlatforms := []string{
+		"tumblr.com", "livejournal.com", "dreamwidth.org", "blogspot.com",
+		"wordpress.com", "createblog.com", "beeplog.com", "insanejournal.com",
+		"softonic.com", "uptodown.com", "informer.com",
+		"51dzw.com", "sxwmcc.com", "9856.cn",
+		"sikatika.com", "qowap.com", "listal.com", "mykajabi.com",
+		"stck.me", "izrablog.com", "blogsidea.com", "blogmazing.com",
+		"jsyinshanfu.com", "life3dblog.com",
+	}
+	for _, p := range spamPlatforms {
+		if strings.HasSuffix(domain, p) {
+			return false
+		}
+	}
+
+	// Reject social media and big tech
+	bigDomains := []string{
+		"facebook.com", "twitter.com", "instagram.com", "linkedin.com",
+		"youtube.com", "youtu.be", "tiktok.com", "pinterest.com",
+		"reddit.com", "discord.com", "discord.gg", "telegram.org", "t.me",
+		"whatsapp.com", "wa.me",
+		"google.com", "googleapis.com", "gstatic.com",
+		"apple.com", "microsoft.com",
+		"amazon.com", "amazonaws.com", "cloudfront.net",
+		"bit.ly", "tinyurl.com", "t.co", "goo.gl",
+	}
+	for _, d := range bigDomains {
+		if domain == d || strings.HasSuffix(domain, "."+d) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (c *Crawler) isBlacklisted(domain string) bool {
 	// Skip social media, CDNs, trackers, etc.
 	blacklist := []string{
@@ -779,6 +957,25 @@ func (c *Crawler) isBlacklisted(domain string) bool {
 		"apple.com", "microsoft.com",
 		"doubleclick.net", "googlesyndication.com", "googleadservices.com",
 		"t.co", "bit.ly", "tinyurl.com",
+		// Subdomain farms that generate endless low-quality pages
+		"51dzw.com",       // Chinese electronics parts catalog (549k+ subdomains)
+		"9856.cn",         // Similar parts catalog
+		"sxwmcc.com",      // Similar
+		"softonic.com",    // Software downloads - too many locale subdomains
+		"uptodown.com",    // Software downloads
+		"informer.com",    // Software downloads
+		"listal.com",      // User profile pages
+		"insanejournal.com", // Blog platform with low-quality user pages
+		// Thai gambling/SEO spam farms
+		"velo-mapshop.com",
+		"unmemovie.com",
+		"cybersafetrick.com",
+		"autoinformazioni.org",
+		"cucharacuchillicoytenedor.com",
+		"sikatika.com",
+		"jsyinshanfu.com",
+		"stck.me",
+		"daytravel.net",
 	}
 
 	for _, b := range blacklist {
@@ -797,6 +994,46 @@ func extractDomain(rawURL string) string {
 		return ""
 	}
 	return strings.TrimPrefix(u.Host, "www.")
+}
+
+// extractRootDomain extracts the registrable root domain from a full domain.
+// e.g., "foo.bar.example.com" -> "example.com"
+//       "sub.dreamwidth.org" -> "dreamwidth.org"
+//       "example.co.uk" -> "example.co.uk" (approximation)
+func extractRootDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) <= 2 {
+		return domain
+	}
+
+	// Handle common two-part TLDs
+	twoPartTLDs := map[string]bool{
+		"co.uk": true, "org.uk": true, "ac.uk": true, "gov.uk": true,
+		"co.jp": true, "ne.jp": true, "or.jp": true, "ac.jp": true,
+		"com.au": true, "org.au": true, "net.au": true, "edu.au": true,
+		"co.nz": true, "org.nz": true, "net.nz": true,
+		"co.za": true, "org.za": true,
+		"com.br": true, "org.br": true, "net.br": true,
+		"com.cn": true, "org.cn": true, "net.cn": true, "gov.cn": true,
+		"com.tw": true, "org.tw": true,
+		"com.hk": true, "org.hk": true,
+		"co.kr": true, "or.kr": true,
+		"com.mx": true, "org.mx": true,
+		"com.ar": true, "org.ar": true,
+		"co.in": true, "org.in": true, "net.in": true,
+	}
+
+	// Check if last two parts form a known two-part TLD
+	if len(parts) >= 3 {
+		possibleTLD := parts[len(parts)-2] + "." + parts[len(parts)-1]
+		if twoPartTLDs[possibleTLD] {
+			// Return last 3 parts (e.g., "example.co.uk")
+			return strings.Join(parts[len(parts)-3:], ".")
+		}
+	}
+
+	// Default: return last 2 parts (e.g., "example.com")
+	return strings.Join(parts[len(parts)-2:], ".")
 }
 
 func isBotProtected(html string) bool {
