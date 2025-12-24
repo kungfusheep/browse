@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -59,18 +60,21 @@ type Site struct {
 
 // Crawler manages the crawling process
 type Crawler struct {
-	config        Config
-	db            *sql.DB
-	client        *http.Client
-	visited       map[string]bool
-	visitedMu     sync.RWMutex
-	queue         chan CrawlJob
-	results       chan Site
-	wg            sync.WaitGroup
-	ctx           context.Context
-	cancel        context.CancelFunc
-	domainLast    map[string]time.Time
-	domainMu      sync.Mutex
+	config         Config
+	db             *sql.DB
+	client         *http.Client
+	visited        map[string]bool
+	visitedMu      sync.RWMutex
+	failed         map[string]bool // domains we've tried and failed
+	failedMu       sync.RWMutex
+	failedStmt     *sql.Stmt // prepared statement for recording failures
+	queue          chan CrawlJob
+	results        chan Site
+	wg             sync.WaitGroup
+	ctx            context.Context
+	cancel         context.CancelFunc
+	domainLast     map[string]time.Time
+	domainMu       sync.Mutex
 	subdomainCount map[string]int // count of subdomains crawled per root domain
 	subdomainMu    sync.RWMutex
 }
@@ -155,6 +159,12 @@ func main() {
 		fmt.Printf("Loaded %d seeds from %s\n", count, *seedFile)
 	}
 
+	// Start pprof server for profiling
+	go func() {
+		log.Println("pprof available at http://localhost:6061/debug/pprof/")
+		log.Println(http.ListenAndServe("localhost:6061", nil))
+	}()
+
 	// Start crawling
 	crawler := NewCrawler(config, db)
 
@@ -224,10 +234,19 @@ func initDB(path string) (*sql.DB, error) {
 		added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
+	-- Track domains we've attempted but failed (dead, blocked, etc)
+	-- This prevents repeatedly trying the same broken domains
+	CREATE TABLE IF NOT EXISTS failed (
+		domain TEXT PRIMARY KEY,
+		reason TEXT,
+		attempted TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_sites_score ON sites(score DESC);
 	CREATE INDEX IF NOT EXISTS idx_sites_category ON sites(category);
 	CREATE INDEX IF NOT EXISTS idx_queue_priority ON queue(priority DESC);
 	CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_domain);
+	CREATE INDEX IF NOT EXISTS idx_failed_domain ON failed(domain);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -239,11 +258,17 @@ func initDB(path string) (*sql.DB, error) {
 
 func NewCrawler(config Config, db *sql.DB) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Prepare statement for recording failures
+	failedStmt, _ := db.Prepare("INSERT OR IGNORE INTO failed (domain, reason) VALUES (?, ?)")
+
 	return &Crawler{
 		config:         config,
 		db:             db,
 		client:         &http.Client{Timeout: config.RequestTimeout},
 		visited:        make(map[string]bool),
+		failed:         make(map[string]bool),
+		failedStmt:     failedStmt,
 		queue:          make(chan CrawlJob, 10000),
 		results:        make(chan Site, 1000),
 		ctx:            ctx,
@@ -257,6 +282,11 @@ func (c *Crawler) Run() error {
 	// Load visited domains from DB
 	if err := c.loadVisited(); err != nil {
 		return fmt.Errorf("loading visited: %w", err)
+	}
+
+	// Load failed domains from DB
+	if err := c.loadFailed(); err != nil {
+		return fmt.Errorf("loading failed: %w", err)
 	}
 
 	// Load queue from DB
@@ -379,6 +409,8 @@ func (c *Crawler) crawl(job CrawlJob) {
 	site, err := c.analyzeSite(job)
 	if err != nil {
 		log.Printf("[%s] Error: %v", domain, err)
+		// Record this failure so we don't retry this domain
+		c.recordFailure(domain, err.Error())
 		return
 	}
 
@@ -718,6 +750,41 @@ func (c *Crawler) loadVisited() error {
 	return rows.Err()
 }
 
+func (c *Crawler) loadFailed() error {
+	rows, err := c.db.Query("SELECT domain FROM failed")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var domain string
+		if err := rows.Scan(&domain); err != nil {
+			return err
+		}
+		c.failed[domain] = true
+	}
+	fmt.Printf("Loaded %d failed domains to skip\n", len(c.failed))
+	return rows.Err()
+}
+
+func (c *Crawler) recordFailure(domain, reason string) {
+	// Add to in-memory map
+	c.failedMu.Lock()
+	c.failed[domain] = true
+	c.failedMu.Unlock()
+
+	// Truncate reason to prevent huge DB entries
+	if len(reason) > 100 {
+		reason = reason[:100]
+	}
+
+	// Persist to DB (async, don't block crawling)
+	if c.failedStmt != nil {
+		go c.failedStmt.Exec(domain, reason)
+	}
+}
+
 func (c *Crawler) loadQueue() ([]CrawlJob, error) {
 	rows, err := c.db.Query("SELECT url, depth, found_from FROM queue ORDER BY priority DESC LIMIT ?", c.config.MaxDomains)
 	if err != nil {
@@ -744,16 +811,20 @@ func (c *Crawler) loadQueue() ([]CrawlJob, error) {
 	return jobs, rows.Err()
 }
 
-// pollForNewSeeds checks the queue table every 30 seconds for new seeds
+// pollForNewSeeds checks the queue table frequently for new seeds
 // added while the crawler is running (via -add or direct SQL insert).
 // If no explicit seeds are found, it pulls uncrawled domains from the links table.
 func (c *Crawler) pollForNewSeeds() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
+			// Only refill if queue is getting low
+			if len(c.queue) > 1000 {
+				continue
+			}
 			// First try explicit queue
 			jobs, err := c.loadQueue()
 			if err != nil {
@@ -763,7 +834,7 @@ func (c *Crawler) pollForNewSeeds() {
 
 			// If queue is empty, pull from discovered links
 			if len(jobs) == 0 {
-				jobs, err = c.loadDiscoveredDomains(5000)
+				jobs, err = c.loadDiscoveredDomains(10000)
 				if err != nil {
 					log.Printf("Error loading discovered domains: %v", err)
 					continue
@@ -788,6 +859,14 @@ func (c *Crawler) pollForNewSeeds() {
 					continue
 				}
 
+				// Skip failed domains
+				c.failedMu.RLock()
+				alreadyFailed := c.failed[domain]
+				c.failedMu.RUnlock()
+				if alreadyFailed {
+					continue
+				}
+
 				select {
 				case c.queue <- job:
 					added++
@@ -807,47 +886,75 @@ func (c *Crawler) pollForNewSeeds() {
 // loadDiscoveredDomains pulls uncrawled domains from the links table
 func (c *Crawler) loadDiscoveredDomains(limit int) ([]CrawlJob, error) {
 	// Get domains that have been linked to but never crawled
-	// Use LEFT JOIN for performance (NOT IN is slow with millions of rows)
-	// Exclude known spam patterns directly in SQL for efficiency
+	// Use rowid offset for fast random sampling
+	// We filter against visited map in memory for speed
+
+	// Get a random starting point
+	var maxRowid int
+	c.db.QueryRow("SELECT MAX(rowid) FROM links").Scan(&maxRowid)
+	offset := 0
+	if maxRowid > limit*10 {
+		offset = int(time.Now().UnixNano() % int64(maxRowid-limit*10))
+	}
+
 	rows, err := c.db.Query(`
-		SELECT DISTINCT l.to_domain FROM links l
-		LEFT JOIN sites s ON l.to_domain = s.domain
-		WHERE s.domain IS NULL
-		-- Spam farms and low-quality platforms
-		AND l.to_domain NOT LIKE '%.51dzw.com'
-		AND l.to_domain NOT LIKE '%.sxwmcc.com'
-		AND l.to_domain NOT LIKE '%.9856.cn'
-		AND l.to_domain NOT LIKE '%.softonic.%'
-		AND l.to_domain NOT LIKE '%.uptodown.%'
-		AND l.to_domain NOT LIKE '%.informer.com'
-		AND l.to_domain NOT LIKE '%.dreamwidth.org'
-		AND l.to_domain NOT LIKE '%.sikatika.com'
-		AND l.to_domain NOT LIKE '%.qowap.com'
-		AND l.to_domain NOT LIKE '%.listal.com'
-		AND l.to_domain NOT LIKE '%.insanejournal.com'
-		AND l.to_domain NOT LIKE '%.livejournal.com'
-		AND l.to_domain NOT LIKE '%.tumblr.com'
-		AND l.to_domain NOT LIKE '%.createblog.com'
-		AND l.to_domain NOT LIKE '%.blogspot.com'
-		AND l.to_domain NOT LIKE '%.wordpress.com'
-		AND l.to_domain NOT LIKE '%.mykajabi.com'
-		AND l.to_domain NOT LIKE '%.stck.me'
-		AND l.to_domain NOT LIKE '%.izrablog.com'
-		AND l.to_domain NOT LIKE '%.blogsidea.com'
-		AND l.to_domain NOT LIKE '%.blogmazing.com'
-		AND l.to_domain NOT LIKE '%.jsyinshanfu.com'
-		AND l.to_domain NOT LIKE '%.oh-hotel.%'
-		-- Suspicious TLDs
-		AND l.to_domain NOT LIKE '%.online'
-		AND l.to_domain NOT LIKE '%.click'
-		AND l.to_domain NOT LIKE '%.top'
-		AND l.to_domain NOT LIKE '%.cn'
-		-- Basic validation
-		AND LENGTH(l.to_domain) < 50
-		AND LENGTH(l.to_domain) > 5
-		AND l.to_domain GLOB '[a-z][a-z0-9-]*.[a-z]*'
+		SELECT DISTINCT to_domain FROM links
+		WHERE rowid > ?
+		AND LENGTH(to_domain) < 50
+		AND LENGTH(to_domain) > 5
+		AND to_domain GLOB '[a-z][a-z0-9-]*.[a-z]*'
+		-- Exclude spam TLDs
+		AND to_domain NOT LIKE '%.online'
+		AND to_domain NOT LIKE '%.click'
+		AND to_domain NOT LIKE '%.top'
+		AND to_domain NOT LIKE '%.cn'
+		AND to_domain NOT LIKE '%.xyz'
+		AND to_domain NOT LIKE '%.tk'
+		AND to_domain NOT LIKE '%.ml'
+		AND to_domain NOT LIKE '%.ga'
+		AND to_domain NOT LIKE '%.cf'
+		AND to_domain NOT LIKE '%.ru'
+		-- Exclude blog/social platforms
+		AND to_domain NOT LIKE '%.tumblr.com'
+		AND to_domain NOT LIKE '%.blogspot.com'
+		AND to_domain NOT LIKE '%.wordpress.com'
+		AND to_domain NOT LIKE '%.livejournal.com'
+		AND to_domain NOT LIKE '%.github.io'
+		AND to_domain NOT LIKE '%.medium.com'
+		-- Exclude known spam farms (subdomain factories)
+		AND to_domain NOT LIKE '%.huatu.com'
+		AND to_domain NOT LIKE '%.91yk.com'
+		AND to_domain NOT LIKE '%.quaerys.com'
+		AND to_domain NOT LIKE '%.tradedoubler.com'
+		AND to_domain NOT LIKE '%.deviantart.com'
+		-- Exclude numeric subdomain spam patterns (a12.xyz.com, a123.xyz.com style)
+		-- Single letter + digits
+		AND to_domain NOT GLOB '[a-z][0-9][0-9].*'
+		AND to_domain NOT GLOB '[a-z][0-9][0-9][0-9].*'
+		AND to_domain NOT GLOB '[a-z][0-9][0-9][0-9][0-9].*'
+		-- Two letters + digits
+		AND to_domain NOT GLOB '[a-z][a-z][0-9][0-9][0-9].*'
+		AND to_domain NOT GLOB '[a-z][a-z][0-9][0-9][0-9][0-9].*'
+		-- Exclude social/messaging platforms
+		AND to_domain NOT LIKE 'telegram.%'
+		AND to_domain NOT LIKE '%.telegram.%'
+		AND to_domain NOT LIKE 'slack.%'
+		AND to_domain NOT LIKE '%.slack.%'
+		-- Exclude hotel booking affiliate spam networks
+		AND to_domain NOT LIKE '%-hotels.com'
+		AND to_domain NOT LIKE '%-hotels.org'
+		AND to_domain NOT LIKE '%-hotels.net'
+		AND to_domain NOT LIKE '%hotels.com'
+		AND to_domain NOT LIKE '%romehotels.com'
+		AND to_domain NOT LIKE '%parishotels.com'
+		AND to_domain NOT LIKE '%barcelonahotels.com'
+		AND to_domain NOT LIKE '%.1costa%.com'
+		AND to_domain NOT LIKE '%.hotel-rhonealpes.com'
+		AND to_domain NOT LIKE '%.antiguahotels.net'
+		AND to_domain NOT LIKE '%.madeira-islandshotels.com'
+		AND to_domain NOT LIKE '%.hotelaluxembourg.com'
 		LIMIT ?
-	`, limit)
+	`, offset, limit*3) // Fetch extra since we'll filter
 	if err != nil {
 		return nil, err
 	}
@@ -859,10 +966,27 @@ func (c *Crawler) loadDiscoveredDomains(limit int) ([]CrawlJob, error) {
 		if err := rows.Scan(&domain); err != nil {
 			return nil, err
 		}
+		// Skip if already visited (in memory check is fast)
+		c.visitedMu.RLock()
+		visited := c.visited[domain]
+		c.visitedMu.RUnlock()
+		if visited {
+			continue
+		}
+		// Skip if previously failed
+		c.failedMu.RLock()
+		failed := c.failed[domain]
+		c.failedMu.RUnlock()
+		if failed {
+			continue
+		}
 		jobs = append(jobs, CrawlJob{
 			URL:   "https://" + domain,
 			Depth: 0,
 		})
+		if len(jobs) >= limit {
+			break
+		}
 	}
 	return jobs, rows.Err()
 }
